@@ -6,8 +6,11 @@ import serial
 import time
 import numpy as np
 import ur_safety
+import pyueye
+import Kinect_Snap
+from util import *
 
-# Define
+# ----------------- Define -------------------------
 PI = np.pi
 HOME = (0, -90 * PI / 180, 0, -90 * PI / 180, 0, 0)
 shf_way_pt = np.array([[-0.82222461061452856, -1.5587535549561358, -2.0142844897266556, -1.0569713950077662, 1.5327481491014201, 0.23544491609403506],
@@ -18,6 +21,7 @@ shf_way_pt = np.array([[-0.82222461061452856, -1.5587535549561358, -2.0142844897
                        [-1.5042992822939125, -1.2472122834751478, 1.073901088752111, -1.5341444125030159, 4.6266933141117681, 1.6214108751027323],
                        [-1.5100588688254937, -0.79656827061021196, 1.0751228192285072, -1.8051940453377351, 4.6223299909817817, 1.6214108751027323],
                        [-1.5334462808022178, -1.3646729421343662, 1.011069235680315, -1.7208946424664087, 4.6116834825446169, 1.5678292670665062]])
+# --------------------------------------------------
 
 class envRobot :
     def __init__(self, SOCKET_IP):
@@ -26,7 +30,8 @@ class envRobot :
         self.rob = urx.Robot(SOCKET_IP)                             # Robot
         self.safety = ur_safety.safety_chk(host= SOCKET_IP)   # Robot - Dashboard ( for collision check)
         self.bluetooth = serial.Serial("COM9", 9600, timeout=1)     # Tray
-        self.cam = pyueye.uEyeCAM()
+        self.local_cam = pyueye.uEyeCAM()
+        self.global_cam = Kinect_Snap.take_snap()
 
         # Robot
         self.acc = 1.5; self.vel = 1.5
@@ -37,10 +42,10 @@ class envRobot :
     def step(self, action):
         self.rob.movej(action, acc = self.acc, vel = self.vel)
 
-
         if self.collision_chk() == True :
             reward = 1234
             self.done = True
+        # TODO : consider axis Z ????
         # elif self.maximum z threshold chk??????
         #    self.done = False
         #    reward = 1234
@@ -119,16 +124,16 @@ class envRobot :
         time.sleep(3)  # waiting
 
     def get_state(self):
-        # Cam. Img, robot Joint, robot EndEffector
-        return self.cam.get_img(), self.rob.getj(), self.rob.getl()
+        global_img = self.global_cam.snap()
+        local_img = self.local_cam.snap()
 
-    def rad2deg(rad):
-        deg = list(map(lambda x: x * 180. / PI, rad))
-        return deg
+        # TODO 1 : Camera Image resizing
 
-    def deg2rad(deg):
-        rad = list(map(lambda x: x * PI / 180., deg))
-        return rad
+        # TODO 2 : Data
+        rob_joint = self.rob.getj()
+        tcp_pose = self.rob.getl()
+
+        return [global_img, local_img, rob_joint, tcp_pose]
 
     def teaching_mode(self):
         # TODO : Reserved

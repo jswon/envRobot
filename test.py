@@ -1,8 +1,16 @@
 import envRobot
+import Kinect_Snap
+from PIL import Image as Im
 
-env = envRobot.envRobot()
+get_image = Kinect_Snap.take_snap()
 
-env.
+test = get_image.snap()
+
+test.show()
+
+print("!11")
+#env = envRobot.envRobot()
+
 
 
 # import sys
