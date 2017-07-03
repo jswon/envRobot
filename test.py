@@ -1,12 +1,56 @@
 import envRobot
 import Kinect_Snap
-from PIL import Image as Im
+import numpy as np
+import cv2
 
-get_image = Kinect_Snap.take_snap()
+# cap = cv2.VideoCapture(0)
+#
+# while(True):
+#     # Capture frame-by-frame
+#     ret, frame = cap.read()
+#
+#     #gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+#
+#     # Display the resulting frame
+#     cv2.imshow('frame', frame)
+#     print(1)
+#     if cv2.waitKey(1) & 0xFF == ord('q'):
+#         break
 
-test = get_image.snap()
+global_cam = Kinect_Snap.global_cam()  # Load Camera
 
-test.show()
+img = global_cam.snap()   # snapshot
+cv2.imshow("initial", img)
+hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+lower_blue = np.array([114, 75, 85])
+upper_blue = np.array([180,255,255])
+mask = cv2.inRange(hsv, lower_blue, upper_blue)
+
+result = cv2.bitwise_and(img,img,mask = mask)
+
+
+cv2.imshow("test",result)
+ret,thresh = cv2.threshold(result,127,255,cv2.THRESH_BINARY)
+blurred = cv2.medianBlur(thresh,5)
+blurred = cv2.cvtColor(blurred, cv2.COLOR_RGB2GRAY)
+th3 = cv2.adaptiveThreshold(blurred,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,11,2)
+
+cv2.imshow("thresh",th3)
+
+_, contours, hierarchy = cv2.findContours(th3, 1, 2)
+max_radius = 0
+for cnt in contours:
+    if cv2.contourArea(cnt) < 60000 :
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        (cx, cy), radius = cv2.minEnclosingCircle(cnt)
+        print(cx, cy)
+
+        if radius > max_radius :
+            max_radius = radius
+
+cv2.circle(img, (int(cx), int(cy)), int(radius), (0, 0, 255), 2)  # draw circle in red color
+cv2.imshow('input', img)
+
 
 print("!11")
 #env = envRobot.envRobot()

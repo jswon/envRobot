@@ -194,7 +194,6 @@ def render_action_to_png(step, action):
 def one_hot_encode(x):
     return np.eye(len(x))[x]
 
-
 def rad2deg(rad):
   deg = list(map(lambda x: x * 180. / np.pi, rad))
   return deg

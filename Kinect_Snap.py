@@ -1,19 +1,10 @@
-# import os
-# import sys
-# file_directory = os.getcwd()+ "\\PyKinect2-master\\pykinect2"
-# sys.path.append(file_directory)
 import PyKinectV2
 import PyKinectRuntime
 import sys
+import cv2
+import numpy as np
 
-from PIL import Image as Im
-
-if sys.hexversion >= 0x03000000:
-    import _thread as thread
-else:
-    import thread
-
-class take_snap(object):
+class global_cam(object):
     def __init__(self):
         # Kinect runtime object, we want only color
         self._kinect = PyKinectRuntime.PyKinectRuntime(PyKinectV2.FrameSourceTypes_Color)
@@ -21,14 +12,18 @@ class take_snap(object):
     def snap(self):
         while(True):
             if self._kinect.has_new_color_frame():
-                frame = self._kinect.get_last_color_frame()
-                result_image = Im.frombuffer("RGBA", (self._kinect.color_frame_desc.Width, self._kinect.color_frame_desc.Height), frame, "raw", "RGBA", 0, 1)
-                b, g, r, a = result_image.split()
-                result_image = Im.merge("RGBA", (r, g, b, a))
-                result_image = result_image.transpose(Im.FLIP_LEFT_RIGHT)
+                raw_array = self._kinect.get_last_color_frame()
 
-                return result_image
+                raw_img = raw_array.reshape((1080, 1920, 4))  # to Mat
+                cv2.flip()
+                flipped_img = cv2.flip(raw_img, 1)            # Flipped Image
+                cropped_img = flipped_img[70:870, 550:1330]   # cropped ROI, Global View
+                result_img = cv2.resize(cropped_img, (256, 256))  # resized image (256,256) RGBA
+                result_img = cv2.cvtColor(result_img, cv2.COLOR_RGBA2RGB) # Foramt : RGB
+
+                #cv2.imshow("result_image", result_img)
+                #cv2.waitKey(0)
+                return result_img
 
     def endthekinect(self):
         self._kinect.close()
-

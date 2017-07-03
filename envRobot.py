@@ -12,7 +12,7 @@ from util import *
 
 # ----------------- Define -------------------------
 PI = np.pi
-HOME = (0, -90 * PI / 180, 0, -90 * PI / 180, 0, 0)
+HOME = (90 * PI / 180, -90 * PI / 180, 0, -90 * PI / 180, 0, 0)
 shf_way_pt = np.array([[-0.82222461061452856, -1.5587535549561358, -2.0142844897266556, -1.0569713950077662, 1.5327481491014201, 0.23544491609403506],
                        [-1.5591026208065346, -0.87423542232395968, 0.88383473320992845, -1.5660839378145119, 4.6582837735728653, 1.5947073375472192],
                        [-1.524196035766648, -0.79656827061021196, 1.0779153460316979, -1.8202038769048863, 4.6553167138444751, 1.5924384095196262],
@@ -31,7 +31,7 @@ class envRobot :
         self.safety = ur_safety.safety_chk(host= SOCKET_IP)   # Robot - Dashboard ( for collision check)
         self.bluetooth = serial.Serial("COM9", 9600, timeout=1)     # Tray
         self.local_cam = pyueye.uEyeCAM()
-        self.global_cam = Kinect_Snap.take_snap()
+        self.global_cam = Kinect_Snap.global_cam()
 
         # Robot
         self.acc = 1.5; self.vel = 1.5
@@ -138,6 +138,3 @@ class envRobot :
     def teaching_mode(self):
         # TODO : Reserved
         pass
-
-
-
