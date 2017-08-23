@@ -7,7 +7,12 @@ def nothing(x):
 
 global_cam = Kinect_Snap.global_cam()  # Load Camera
 
-img = global_cam.snap()
+# img = global_cam.snap()
+
+
+img_path = "E:\\save_data_4\\initial_image\\"
+
+img = cv2.imread(img_path + "101.bmp", cv2.IMREAD_COLOR)
 
 hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
 
