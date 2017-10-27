@@ -1,7 +1,7 @@
 """
 For grasping using IK v2,
 with calibration,
-latest Ver.171025
+latest Ver.171027
 """
 
 # system
@@ -159,21 +159,20 @@ class Env:
         cv2.imwrite(save_path + "{}_{}.bmp".format(class_idx, num), self.state)  # Save the current image
 
         # TODO : SAVE END - OBJ_POSE, TARGET_OBJ_
-        # data = self.getl[0:3] - self.obj_pos
-        data = [-1, -2, 3]
+        data = self.getl()[0:3] - self.obj_pos
         with open(save_path + "{}_{}.txt".format(class_idx, num), "w") as f:   # (x, y, z, base angle)
             f.write("{} {} {}".format(*data))
         self.max_num_list[class_idx] += 1
 
     def approaching(self, class_idx):
-        self.obj_pos = self.get_obj_pos(class_idx) + np.array([0, 0, 0.05])    # z-dummy 0.05
+        self.obj_pos = self.get_obj_pos(class_idx)
+
         self.movej(INITIAL_POSE)    # Move to center
         self.movej(starting_pose)      # Move to starting position,
-        goal = np.append(self.obj_pos, [0, -3.14, 0])      # Initial point
-        try :
-            self.movel(goal)
-        except urx.RobotException:
-            pass
+
+        goal = np.append(self.obj_pos  + np.array([0, 0, 0.05]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
+
+        self.movel(goal)
 
     def grasp(self):
         # Down move
@@ -223,12 +222,6 @@ class Env:
         # reward = self.grasp()
         reward = 1
 
-        if self.opts.with_data_collecting and num_data > 0:
-            self.store_data(target_obj)
-
-        else:   # Collide, robot not move, hold state but update reward
-            pass
-
         self.done = True
 
         return np.copy(self.state), reward, actual_action, self.done, is_terminal
@@ -237,7 +230,7 @@ class Env:
         self.internal_state = np.array([-1.0, -0.5, 0, 0.5, 1]) * self.getj()[-1]
 
     def getl(self):
-        return self.rob.getl()
+        return np.array(self.rob.getl())
 
     def getj(self):
         return np.around(np.array(self.rob.getj()), decimals=4)
@@ -327,7 +320,7 @@ class Env:
             return self.global_cam.snap()
 
         if camera_num == 2:
-            # TODO : PIL
+            # TODO : Compare resized Image, PIL resize vs cv2 resize
             # return Image.fromarray(self.local_cam.snap()).resize((256, 256), Image.NEAREST)
             return cv2.resize(self.local_cam.snap(), (256, 256))
 
@@ -355,78 +348,16 @@ class Env:
         return OBJ_LIST[object_index]
 
     def get_obj_pos(self, class_idx):
-        img, self.depth_f = self.global_cam.snap()   # < #delay
-        time.sleep(1)               # Segmentation input image  w : 256, h : 128
+        time.sleep(4)
+        img = self.global_cam.snap()   # Segmentation input image  w : 256, h : 128
         padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)    # Color fmt    RGB -> BGR
-        cv2.imwrite("input.bmp", padded_img)
+
         # Run Network.
         segmented_image = self.segmentation_model.run(padded_img)
-        color_img = self.segmentation_model.convert_grey_label_to_color_label(segmented_image)
-        cv2.imwrite("result.bmp", color_img)
 
-        # TODO : object index is not seg_index
-        pxl_list = self.segmentation_model.getPoints(segmented_image, class_idx)
+        pxl_list = self.segmentation_model.getPoints(segmented_image, class_idx)  # Get pixel list
 
-        test_pxl = np.copy(pxl_list)
-
-        global_view = cv2.imread("view.bmp")
-
-        for y, x in test_pxl:
-            g_x = int((255 - x) * 3.035 + 573)   # Width revision, rate : 3.03515625, offset : 573
-            g_y = int((y + 127) * 3.1953125 + 143)       # Height revision, rate : 3.1953125, offset : 143
-            global_view[g_y, g_x, :] = np.array([0, 0, 255])
-
-        cv2.imwrite("global_error.bmp", global_view)
-
-        for [x, y] in pxl_list:
-            padded_img[x, y] = np.array([0, 0, 255])
-
-        cv2.imwrite("Error.bmp", padded_img)
-
-        print("Start time : {}".format(datetime.datetime.now()))
-        # TODO : Crop center test
-
-        mean_pxl = np.mean(pxl_list, axis=0).astype(np.uint64)
-
-        pxl_patch = []
-        start_pxl = mean_pxl - np.array([2, 2])
-
-        for i in range(5):
-            for j in range(5):
-                pxl_patch.append(start_pxl+np.array([i, j]))
-
-        for y, x in pxl_patch:
-            g_x = int((255 - x) * 3.035 + 573)   # Width revision, rate : 3.03515625, offset : 573
-            g_y = int((y + 127) * 3.1953125 + 143)       # Height revision, rate : 3.1953125, offset : 143
-            global_view[g_y, g_x, :] = np.array([255, 255, 0])
-
-        cv2.imwrite("global_patch.bmp", global_view)
-
-        xyz_list = []
-        [xyz_list.append(self.global_cam.color2xyz(self.depth_f, i)) for i in pxl_patch]
-        xyz_list = np.array(xyz_list)
-
-        nan_idx = np.sort(np.transpose(np.argwhere(np.isnan(xyz_list))[0::3])[0])
-
-        for x in reversed(nan_idx):
-            xyz_list = np.delete(xyz_list, x, 0)
-
-        # # # seg -> 256,256 -->>>> coordinate 1920 x 1024
-        # seg_result_pixel = [cx, cy]
-        # xyz = self.global_cam.color2xyz(self.depth_f, seg_result_pixel)
-
-        print("Calculated num. : %s" % xyz_list.shape[0])
-
-        # TODO : Average
-        # 실제로는 모든 pixel 에 대해 average 예정
-        mean_xyz = np.mean(xyz_list, axis=0)
-
-        print("End time : {}".format(datetime.datetime.now()))
-
-        with open("1.txt", "w") as f:   # (x, y, z, base angle)
-            for data in xyz_list:
-                f.write("{} {} {}\n".format(*data))
-
+        mean_xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
         return mean_xyz
 
     def set_tcp(self, tcp):
