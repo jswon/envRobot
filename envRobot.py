@@ -1,11 +1,8 @@
 """
-For grasping using IK v2,
-with calibration,
+For grasping using IK v2, pre-training
+with calibration, segmentation, Random Pick
 latest Ver.171027
 """
-
-# system
-import os
 
 # Robot
 import urx
@@ -18,6 +15,7 @@ import pyGrip
 import random
 import cv2
 import serial
+
 from util import *
 
 # ----------------- Define -----------------------------------------------------
@@ -72,6 +70,9 @@ class Env:
         self.global_cam = Kinect()                         # Kinect Camera
         self.local_cam = UEyeCam()                         # Local Camera
 
+        # Segmentetation Model
+        self.segmentation_model = None
+
         # Robot
         self.acc = 1.5
         self.vel = 1.5
@@ -82,7 +83,7 @@ class Env:
         self.render_height = opts.render_height
         self.num_cameras = opts.num_cameras
         self.repeats = opts.action_repeats
-        self.default_tcp = [0, 0, 0.150, 0, 0, 0]                                     # (x, y, z, rx, ry, rz)     # TODO: TCP z position
+        self.default_tcp = [0, 0, 0.150, 0, 0, 0]  # (x, y, z, rx, ry, rz)
         self.done = False
 
         # States - Local cam img. w : 256, h : 256, c :3
@@ -94,11 +95,12 @@ class Env:
         self.action_dim = opts.action_dim    # 1dim?
 
         # object position
+        self.target_cls = 0
         self.obj_pos = np.zeros([3])         # (x, y, z)
         self.depth_f = np.zeros([1])
 
         # Make directory for save Data Path
-        # TODO DATA SAVER FOR PRE-TRAINING
+        # DATA SAVER FOR PRE-TRAINING
         if self.opts.with_data_collecting:
             self.path_element = []
             self.max_num_list = []
@@ -134,20 +136,23 @@ class Env:
     def set_segmentation_model(self, segmentation_model):
         self.segmentation_model = segmentation_model
 
-    def reset(self, target_obj, num_data):
-        # Robot Reset
+    def reset(self):
+        """
+        Robot Reset
+        :return: state
+        """
         self.movej(HOME)
         # self.gripper.open()
 
         # Approaching
-        target_obj_idx = int(np.argmax(target_obj))
+        target_obj_idx = 0
 
         self.approaching(target_obj_idx)             # robot move
         self.state_update()            # local view
         self.internal_state_update()   # Internal State Update. Last joint angles
 
-        if self.opts.with_data_collecting and num_data > 0:
-            self.store_data(target_obj_idx)
+        if self.opts.with_data_collecting:
+            self.store_data(self.target_cls)
 
         return np.copy(self.state)
 
@@ -158,21 +163,24 @@ class Env:
         # save_image
         cv2.imwrite(save_path + "{}_{}.bmp".format(class_idx, num), self.state)  # Save the current image
 
-        # TODO : SAVE END - OBJ_POSE, TARGET_OBJ_
         data = self.getl()[0:3] - self.obj_pos
         with open(save_path + "{}_{}.txt".format(class_idx, num), "w") as f:   # (x, y, z, base angle)
             f.write("{} {} {}".format(*data))
         self.max_num_list[class_idx] += 1
 
     def approaching(self, class_idx):
-        self.obj_pos = self.get_obj_pos(class_idx)
+        seg_img = self.get_seg()
+        self.obj_pos = self.get_obj_pos(seg_img, class_idx)
 
         self.movej(INITIAL_POSE)    # Move to center
         self.movej(starting_pose)      # Move to starting position,
 
-        goal = np.append(self.obj_pos  + np.array([0, 0, 0.05]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
-
+        goal = np.append(self.obj_pos + np.array([0, 0, 0.05]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
         self.movel(goal)
+
+        # TODO : goal = current robot joint + noise
+        noisy_goal = self.getj()[0:4] + np.array((0, 0, 0, 0))
+        self.movej(noisy_goal)
 
     def grasp(self):
         # Down move
@@ -184,20 +192,23 @@ class Env:
 
         # Move to position
         self.movej(starting_pose)
+        self.movej(np.append(np.array([1.57]), self.getj()[1:]))
 
-        if self.gripper.DETECT_OBJ:
+        seg = self.get_seg()
+
+        remain_obj = self.segmentation_model.getPoints(seg, self.target_cls)
+
+        if self.gripper.DETECT_OBJ and remain_obj < 10:
             reward = 1
         else:
             reward = -1
 
         return reward
 
-    def step(self, action, target_obj, num_data, exploration_noise, is_training):
-        # action = np.array(action)                # action 1 dim.
+    def step(self, action, exploration_noise, is_training):
         target_angle = self.getj()[5] + action
         is_terminal = True
 
-        # TODO : step
         if is_training:
             noise = exploration_noise.noise() / 2
         else:
@@ -220,7 +231,7 @@ class Env:
         self.done = False
 
         # reward = self.grasp()
-        reward = 1
+        reward = 1  # temp reward
 
         self.done = True
 
@@ -248,20 +259,13 @@ class Env:
         self.gripper.set_gripper(speed, force)
 
     def gripper_close(self):
-        # TODO Maybe value < THRESHOLD -> Grasp
         self.gripper.close()
-        if self.gripper.DETECT_OBJ:
-            pass
-            # TODO
-            # k = 'DETECT_OBJ'
 
     def gripper_open(self):
         self.gripper.open()
 
     def shuffle_obj(self):
         self.movej(HOME)
-
-        # chk = self.collision_chk()    # Why made this ?
 
         # #self.movej(shf_way_pt[0])  # random
         # self.movej(shf_way_pt[1])
@@ -347,22 +351,40 @@ class Env:
     def get_obj_name(object_index):
         return OBJ_LIST[object_index]
 
-    def get_obj_pos(self, class_idx):
-        time.sleep(4)
-        img = self.global_cam.snap()   # Segmentation input image  w : 256, h : 128
-        padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)    # Color fmt    RGB -> BGR
+    def get_seg(self):
+        img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
+        padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)  # Color fmt    RGB -> BGR
 
         # Run Network.
-        segmented_image = self.segmentation_model.run(padded_img)
+        return self.segmentation_model.run(padded_img)
+
+    def get_obj_pos(self, segmented_image, class_idx):  # class random pick version
+        time.sleep(4)
+
+        # Random class choice
+        cur_cls_list = np.unique(segmented_image)[:-1]   # Segmented class except for Background '10'
+
+        while True:
+            class_idx = np.random.choice(cur_cls_list)
+
+            if np.argwhere([segmented_image == class_idx]).shape[0] < 10:   # Threshold 10 pixel
+                cur_cls_list = np.delete(cur_cls_list, np.argwhere(cur_cls_list == class_idx))
+            else:
+                break
+
+        self.target_cls = class_idx
+        print(self.get_obj_name(class_idx))
 
         pxl_list = self.segmentation_model.getPoints(segmented_image, class_idx)  # Get pixel list
-
-        mean_xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
-        return mean_xyz
+        xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
+        return xyz
 
     def set_tcp(self, tcp):
         self.rob.set_tcp(tcp)
 
     def shutdown(self):
-        # TODO : Reserved Shutdown
+        """
+        Robot Shutdown function
+        :return:
+        """
         pass
