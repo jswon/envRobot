@@ -15,6 +15,7 @@ import pyGrip
 import random
 import cv2
 import serial
+from ou_noise import OUNoise
 
 from util import *
 
@@ -34,8 +35,6 @@ shf_way_pt = np.array([[-0.82222461061452856, -1.5587535549561358, -2.0142844897
 
 OBJ_LIST = ['O_00_Black_Tape', 'O_01_Glue', 'O_02_Big_USB', 'O_03_Glue_Stick', 'O_04_Big_Box',
             'O_05_Red_Cup', 'O_06_Small_Box', 'O_07_White_Tape', 'O_08_Small_USB',  'O_09_Yellow_Cup']
-
-grasp_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 bkg_padding_img = cv2.imread('new_background\\1.bmp')[:28, :, :]
 # -------------------------------------------------------------------------------
@@ -62,9 +61,10 @@ class Env:
         # Dashboard Control
         self.Dashboard_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.Dashboard_socket.connect((socket_ip, 29999))
+        chk = self._program_send("")
 
         # Tray Control
-        # self.bluetooth = serial.Serial("COM5", 9600, timeout=1)     #  Tray
+        self.bluetooth = serial.Serial("COM5", 9600, timeout=1)     #  Tray
 
         # Camera interface
         self.global_cam = Kinect()                         # Kinect Camera
@@ -90,6 +90,8 @@ class Env:
         self.state_shape = (self.render_height, self.render_width, 3)
         self.state = np.empty(self.state_shape, dtype=np.float32)
         self.internal_state = np.empty([6], dtype=np.float32)
+        self.action_noise = OUNoise(6, 0, theta=0.2, sigma=0.04)
+
 
         # Action Dim
         self.action_dim = opts.action_dim    # 1dim?
@@ -105,7 +107,7 @@ class Env:
             self.path_element = []
             self.max_num_list = []
             dir_path = "E:\\local_pre-set\\"
-            [self.path_element.append(dir_path + str(x) + "\\") for x in grasp_list]
+            [self.path_element.append(dir_path + str(x) + "\\") for x in np.arange(10)]
             if not os.path.exists(dir_path):
                 [os.makedirs(x) for x in self.path_element]
 
@@ -131,7 +133,7 @@ class Env:
                 self.max_num_list.append(1)
 
     def state_update(self):
-        self.state = self.get_camera(2)
+        self.state = np.asarray(self.get_camera(2))
 
     def set_segmentation_model(self, segmentation_model):
         self.segmentation_model = segmentation_model
@@ -145,14 +147,15 @@ class Env:
         # self.gripper.open()
 
         # Approaching
-        target_obj_idx = 0
+        for target_obj_idx in range(9):
+            self.movej(HOME)
+            time.sleep(2)
+            self.approaching(target_obj_idx)             # robot move
+            self.state_update()            # local view
+            self.internal_state_update()   # Internal State Update. Last joint angles
 
-        self.approaching(target_obj_idx)             # robot move
-        self.state_update()            # local view
-        self.internal_state_update()   # Internal State Update. Last joint angles
-
-        if self.opts.with_data_collecting:
-            self.store_data(self.target_cls)
+            # if self.opts.with_data_collecting:
+            #   self.store_data(self.target_cls)
 
         return np.copy(self.state)
 
@@ -161,7 +164,7 @@ class Env:
         num = self.max_num_list[class_idx]
 
         # save_image
-        cv2.imwrite(save_path + "{}_{}.bmp".format(class_idx, num), self.state)  # Save the current image
+        cv2.imwrite(save_path+"{}_{}.bmp".format(class_idx, num), self.state)
 
         data = self.getl()[0:3] - self.obj_pos
         with open(save_path + "{}_{}.txt".format(class_idx, num), "w") as f:   # (x, y, z, base angle)
@@ -173,14 +176,28 @@ class Env:
         self.obj_pos = self.get_obj_pos(seg_img, class_idx)
 
         self.movej(INITIAL_POSE)    # Move to center
-        self.movej(starting_pose)      # Move to starting position,
+        self.movej(starting_pose, 1, 1)      # Move to starting position,
 
-        goal = np.append(self.obj_pos + np.array([0, 0, 0.05]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
-        self.movel(goal)
+        goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
 
-        # TODO : goal = current robot joint + noise
-        noisy_goal = self.getj()[0:4] + np.array((0, 0, 0, 0))
-        self.movej(noisy_goal)
+        for _ in range(5):  # repeat
+            time.sleep(1)
+            self.movel(goal, 1, 1)
+            a_n = self.action_noise.noise()
+            a_n[4:] = 0
+            noisy_goal = self.rob.getj() + a_n
+            self.movej(noisy_goal, 1, 1)
+            self.state_update()            # local view
+
+            if self.opts.with_data_collecting:
+                self.store_data(self.target_cls)
+
+        time.sleep(1)
+        self.movel(goal, 1, 1)
+        self.state_update()  # local view
+
+        if self.opts.with_data_collecting:
+            self.store_data(self.target_cls)
 
     def grasp(self):
         # Down move
@@ -250,10 +267,38 @@ class Env:
         return np.around(np.array(self.rob.getl()[0:3]), decimals=4)
 
     def movej(self, goal_pose, acc=1.5, vel=1.5):
-        self.rob.movej(goal_pose, acc, vel)
+        try:
+            self.rob.movej(goal_pose, acc, vel)
+        except urx.RobotException:
+            self.status_chk()
 
     def movel(self, goal_pose, acc=1.5, vel=1.5):
-        self.rob.movel(goal_pose, acc, vel)
+        try:
+            self.rob.movel(goal_pose, acc, vel)
+        except urx.RobotException:
+            self.status_chk()
+
+    def _program_send(self, cmd):
+        self.Dashboard_socket.send(cmd.encode())
+        return self.Dashboard_socket.recv(1024).decode("utf-8")  # received byte data to string
+
+    def status_chk(self):
+        # ~status chk reward, cur_angle, next_angle use ?
+        robotmode = self._program_send("robotmode\n")[0:-1].split(' ')
+
+        if robotmode[1] == 'POWER_OFF':
+            self._program_send("power on\n")
+            self._program_send("brake release\n")
+
+        safetymode = self._program_send("safetymode\n")[0:-1].split(' ')
+
+        if safetymode[1] == "NORMAL":
+            return "NORMAL"
+
+        if safetymode[1] == "PROTECTIVE_STOP":
+            self._program_send("unlock protective stop\n")
+        if safetymode[1] == "SAFEGUARD_STOP":
+            self._program_send("close safety popup")
 
     def set_gripper(self, speed, force):
         self.gripper.set_gripper(speed, force)
@@ -267,6 +312,7 @@ class Env:
     def shuffle_obj(self):
         self.movej(HOME)
 
+        # Tray Control
         # #self.movej(shf_way_pt[0])  # random
         # self.movej(shf_way_pt[1])
         # self.gripper.move(104)                           # near handle open
@@ -287,15 +333,14 @@ class Env:
               [-0.1491136865872555, -0.31021647495551335, -0.03052286866235667, -2.1570671726727104, 2.2799584355377167, -0.029214990891798114],
               [0.18414105144817525, -0.25296564835782714, -0.021194048759978847, -2.238562873918888, 2.1370170873680085, 0.10380902269948922],
               [-0.1417132578497845, -0.26528795089888607, -0.03157633192772823, -2.1045306382633795, 2.243489988356314, 0.0360411778983116],
-              [0.20295675954768064, -0.16877330661979667, -0.038960103050602234, 0.018988621965437776, -3.007839525712047, -0.875295581190713],
-              [-0.13352761097358432, -0.16247247277870452, -0.025328902795204018, 0.15436650469465374, -2.6904628274570306, -1.555752726987423]]
+              [0.20295675954768064, -0.20877330661979667, -0.038960103050602234, 0.018988621965437776, -3.007839525712047, -0.875295581190713],
+              [-0.13352761097358432, -0.20247247277870452, -0.025328902795204018, 0.15436650469465374, -2.6904628274570306, -1.555752726987423]]
 
         # TRAY
-        # self.bluetooth.write("1".encode())
+        self.bluetooth.write("1".encode())
 
         # TODO Segmentation & Shuffle
-        #region = self._obj_region_chk(*self.get_obj_pos()[:-1])  # Center : 1, 2, 3
-        region = 0
+        region = np.random.randint(0, 3, 1)[0]
         random.seed(datetime.datetime.now())
         random_dir = random.randrange(0, 3)
 
@@ -317,16 +362,14 @@ class Env:
             pass
 
         self.movej(HOME)
-        time.sleep(3)  # waiting
+        time.sleep(4)  # waiting
 
     def get_camera(self, camera_num):
         if camera_num == 1:
             return self.global_cam.snap()
 
         if camera_num == 2:
-            # TODO : Compare resized Image, PIL resize vs cv2 resize
-            # return Image.fromarray(self.local_cam.snap()).resize((256, 256), Image.NEAREST)
-            return cv2.resize(self.local_cam.snap(), (256, 256))
+            return self.local_cam.snap()
 
     @staticmethod
     def _obj_region_chk(x, y):
@@ -352,31 +395,20 @@ class Env:
         return OBJ_LIST[object_index]
 
     def get_seg(self):
+        time.sleep(4)
         img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
         padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)  # Color fmt    RGB -> BGR
 
         # Run Network.
         return self.segmentation_model.run(padded_img)
 
-    def get_obj_pos(self, segmented_image, class_idx):  # class random pick version
-        time.sleep(4)
-
-        # Random class choice
-        cur_cls_list = np.unique(segmented_image)[:-1]   # Segmented class except for Background '10'
-
-        while True:
-            class_idx = np.random.choice(cur_cls_list)
-
-            if np.argwhere([segmented_image == class_idx]).shape[0] < 10:   # Threshold 10 pixel
-                cur_cls_list = np.delete(cur_cls_list, np.argwhere(cur_cls_list == class_idx))
-            else:
-                break
-
+    def get_obj_pos(self, segmented_image, class_idx):  # TODO : class 0~8 repeat version
         self.target_cls = class_idx
         print(self.get_obj_name(class_idx))
 
         pxl_list = self.segmentation_model.getPoints(segmented_image, class_idx)  # Get pixel list
         xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
+
         return xyz
 
     def set_tcp(self, tcp):
