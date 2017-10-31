@@ -1,7 +1,6 @@
 """
-For grasping using IK v2, pre-training
-with calibration, segmentation, Random Pick
-latest Ver.171027
+For grasping using IK v2, Data collect for pre-training
+latest Ver.171031
 """
 
 # Robot
@@ -12,7 +11,7 @@ import socket
 import pyGrip
 
 # utils
-import random
+import copy
 import cv2
 import serial
 from ou_noise import OUNoise
@@ -55,7 +54,7 @@ def add_opts(parser):
 class Env:
     def __init__(self, socket_ip, opts):
         # Connect to Environment
-        # self.gripper = pyGrip.Gripper(host=socket_ip)             # Gripper
+        self.gripper = pyGrip.Gripper(host=socket_ip)             # Gripper
         self.rob = urx.Robot(socket_ip)                             # Robot
 
         # Dashboard Control
@@ -64,7 +63,7 @@ class Env:
         chk = self._program_send("")
 
         # Tray Control
-        self.bluetooth = serial.Serial("COM5", 9600, timeout=1)     #  Tray
+        self.bluetooth = serial.Serial("COM5", 9600, timeout=1)     # Tray
 
         # Camera interface
         self.global_cam = Kinect()                         # Kinect Camera
@@ -144,15 +143,14 @@ class Env:
         :return: state
         """
         self.movej(HOME)
-        # self.gripper.open()
+        self.gripper.open()
 
         # Approaching
         for target_obj_idx in range(9):
             self.movej(HOME)
             time.sleep(2)
             self.approaching(target_obj_idx)             # robot move
-            self.state_update()            # local view
-            self.internal_state_update()   # Internal State Update. Last joint angles
+
 
             # if self.opts.with_data_collecting:
             #   self.store_data(self.target_cls)
@@ -173,31 +171,39 @@ class Env:
 
     def approaching(self, class_idx):
         seg_img = self.get_seg()
-        self.obj_pos = self.get_obj_pos(seg_img, class_idx)
 
-        self.movej(INITIAL_POSE)    # Move to center
-        self.movej(starting_pose, 1, 1)      # Move to starting position,
+        # if the target class not exist, pass
+        if class_idx not in np.unique(seg_img):
+            return
 
-        goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
+        else:
+            self.obj_pos = self.get_obj_pos(seg_img, class_idx)
 
-        for _ in range(5):  # repeat
+            self.movej(INITIAL_POSE)    # Move to center
+            self.movej(starting_pose, 1, 1)      # Move to starting position,
+
+            goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
+
+            for _ in range(5):  # repeat
+                time.sleep(1)
+                self.movel(goal, 1, 1)
+                a_n = self.action_noise.noise()
+                a_n[4:] = 0
+                noisy_goal = self.rob.getj() + a_n
+                self.movej(noisy_goal, 1, 1)
+                self.state_update()            # local view
+
+                if self.opts.with_data_collecting:
+                    self.store_data(self.target_cls)
+
             time.sleep(1)
             self.movel(goal, 1, 1)
-            a_n = self.action_noise.noise()
-            a_n[4:] = 0
-            noisy_goal = self.rob.getj() + a_n
-            self.movej(noisy_goal, 1, 1)
-            self.state_update()            # local view
+
+            self.state_update()  # local view
+            self.internal_state_update()  # Internal State Update. Last joint angles
 
             if self.opts.with_data_collecting:
                 self.store_data(self.target_cls)
-
-        time.sleep(1)
-        self.movel(goal, 1, 1)
-        self.state_update()  # local view
-
-        if self.opts.with_data_collecting:
-            self.store_data(self.target_cls)
 
     def grasp(self):
         # Down move
@@ -266,13 +272,13 @@ class Env:
     def get_ef(self):
         return np.around(np.array(self.rob.getl()[0:3]), decimals=4)
 
-    def movej(self, goal_pose, acc=1.5, vel=1.5):
+    def movej(self, goal_pose, acc=1.2, vel=1.2):
         try:
             self.rob.movej(goal_pose, acc, vel)
         except urx.RobotException:
             self.status_chk()
 
-    def movel(self, goal_pose, acc=1.5, vel=1.5):
+    def movel(self, goal_pose, acc=1.2, vel=1.2):
         try:
             self.rob.movel(goal_pose, acc, vel)
         except urx.RobotException:
@@ -284,21 +290,21 @@ class Env:
 
     def status_chk(self):
         # ~status chk reward, cur_angle, next_angle use ?
-        robotmode = self._program_send("robotmode\n")[0:-1].split(' ')
+        robotmode = self._program_send("robotmode\n")[0:-1].split(' ')[1]
 
-        if robotmode[1] == 'POWER_OFF':
+        if robotmode == 'POWER_OFF':
             self._program_send("power on\n")
             self._program_send("brake release\n")
+            time.sleep(5)
 
-        safetymode = self._program_send("safetymode\n")[0:-1].split(' ')
+        safetymode = self._program_send("safetymode\n")[0:-1].split(' ')[1]
 
-        if safetymode[1] == "NORMAL":
-            return "NORMAL"
-
-        if safetymode[1] == "PROTECTIVE_STOP":
+        if safetymode == "NORMAL":
+            pass
+        if safetymode == "PROTECTIVE_STOP":
             self._program_send("unlock protective stop\n")
-        if safetymode[1] == "SAFEGUARD_STOP":
-            self._program_send("close safety popup")
+        if safetymode == "SAFEGUARD_STOP":
+            self._program_send("close safety popup\n")
 
     def set_gripper(self, speed, force):
         self.gripper.set_gripper(speed, force)
@@ -327,40 +333,38 @@ class Env:
         # self.movej(shf_way_pt[7])
 
         # MIX TRAY
-        # self.gripper_close()
 
-        pt = [[0.1507703842858799, -0.3141178727128849, -0.030569762928828032, 2.2260958131016335, -2.1985942225522668, 0.05813081679518341],
-              [-0.1491136865872555, -0.31021647495551335, -0.03052286866235667, -2.1570671726727104, 2.2799584355377167, -0.029214990891798114],
-              [0.18414105144817525, -0.25296564835782714, -0.021194048759978847, -2.238562873918888, 2.1370170873680085, 0.10380902269948922],
-              [-0.1417132578497845, -0.26528795089888607, -0.03157633192772823, -2.1045306382633795, 2.243489988356314, 0.0360411778983116],
-              [0.20295675954768064, -0.20877330661979667, -0.038960103050602234, 0.018988621965437776, -3.007839525712047, -0.875295581190713],
-              [-0.13352761097358432, -0.20247247277870452, -0.025328902795204018, 0.15436650469465374, -2.6904628274570306, -1.555752726987423]]
+        self.gripper_close()
 
-        # TRAY
-        self.bluetooth.write("1".encode())
+        pt = [[-0.25099, -0.45, -0.04704, -2.18848, -2.22941, 0.05679],
+              [0.25099, -0.45, -0.04704, -2.18848, -2.22941, 0.05679],
+              [0.26807, -0.340179, -0.04704, -2.18848, -2.22941, 0.05679],
+              [-0.26807, -0.340179, -0.04704, -2.18848, -2.22941, 0.05679],
+              [-0.26807, -0.217842, -0.05096, -0.01386,  3.08795, 0.39780],
+              [0.26807, -0.217842, -0.05096, -0.01386, 3.08795, 0.39780]]
 
-        # TODO Segmentation & Shuffle
-        region = np.random.randint(0, 3, 1)[0]
-        random.seed(datetime.datetime.now())
-        random_dir = random.randrange(0, 3)
+        dir_idx = np.random.randint(0, 4, 1)[0]
 
-        if region in [0, 1, 2]:
-            if random_dir == 0:
-                self.movej([1.2345331907272339, -1.776348892842428, 1.9926695823669434, -1.7940548102008265, -1.5028379599200647, -0.41095143953432256])
-                self.movel(pt[region*2])
-                self.movel(pt[region*2+1])
-                self.movej([1.27391582, -1.683021, 2.22669106, -2.14867484, -1.56398954, -0.33615041])
-            elif random_dir == 1:
-                self.movej([1.2345331907272339, -1.776348892842428, 1.9926695823669434, -1.7940548102008265, -1.5028379599200647, -0.41095143953432256])
-                self.movel(pt[region * 2 + 1])
-                self.movel(pt[region * 2])
-                self.movej([1.27391582, -1.683021, 2.22669106, -2.14867484, -1.56398954, -0.33615041])
+        dir = [[0, 1, 2, 3, 4, 5],
+               [1, 0, 3, 2, 5, 4],
+               [4, 5, 2, 3, 0, 1],
+               [5, 4, 3, 2, 1, 0]]
+
+        for i, point in enumerate(dir[dir_idx]):
+            if i == 0:
+                pt_copy = copy.deepcopy(pt)
+                pt_copy[point][0] = pt_copy[point][0] + (0.05 * pow(-1, point + 1))
+                pt_copy[point][2] = pt_copy[point][2] + 0.05
+                self.movej(starting_pose)
+                self.movel(pt_copy[point])
+                pt_copy[point][2] = pt_copy[point][2] - 0.05
+                self.movel(pt_copy[point])
+
             else:
-                pass
+                self.movel(pt[point])
 
-        else:
-            pass
-
+        self.bluetooth.write("1".encode())
+        self.movej(starting_pose)
         self.movej(HOME)
         time.sleep(4)  # waiting
 
@@ -370,21 +374,6 @@ class Env:
 
         if camera_num == 2:
             return self.local_cam.snap()
-
-    @staticmethod
-    def _obj_region_chk(x, y):
-        y = abs(y)
-        if - 0.08 <= x <= 0.08:
-            if y >= 0.287:
-                return 0
-            elif 0.2 <= y < 0.287:
-                return 1
-            elif y <= 0.2:
-                return 2
-        elif x > 0.08:
-            return 3
-        elif x < -0.08:
-            return 4
 
     def teaching_mode(self):
         # TODO : Reserved
@@ -415,8 +404,4 @@ class Env:
         self.rob.set_tcp(tcp)
 
     def shutdown(self):
-        """
-        Robot Shutdown function
-        :return:
-        """
         pass
