@@ -1,6 +1,10 @@
 """
-For grasping using IK v2, Data collect for pre-training
-latest Ver.171031
+For grasping using IK v2, data collect for pre-training
+with calibration, segmentation
+
+# # Data Collector # # #
+
+latest Ver.171109
 """
 
 # Robot
@@ -14,6 +18,7 @@ import pyGrip
 import copy
 import cv2
 import serial
+import random
 from ou_noise import OUNoise
 
 from util import *
@@ -71,6 +76,8 @@ class Env:
 
         # Segmentetation Model
         self.segmentation_model = None
+        self.obj_angle = 0
+        self.is_symm = 0
 
         # Robot
         self.acc = 1.5
@@ -109,7 +116,7 @@ class Env:
             [self.path_element.append(dir_path + str(x) + "\\") for x in np.arange(10)]
             if not os.path.exists(dir_path):
                 [os.makedirs(x) for x in self.path_element]
-
+                self.update_max_list()
             else:         # Make file indexing
                 self.update_max_list()
 
@@ -120,7 +127,6 @@ class Env:
         print("Robot Environment Ready.", file=sys.stderr)
 
     def update_max_list(self):
-        self.max_num_list = []
         for path in self.path_element:
             dummy = []
             if len(os.listdir(path)) != 0:
@@ -151,10 +157,6 @@ class Env:
             time.sleep(2)
             self.approaching(target_obj_idx)             # robot move
 
-
-            # if self.opts.with_data_collecting:
-            #   self.store_data(self.target_cls)
-
         return np.copy(self.state)
 
     def store_data(self, class_idx):
@@ -164,9 +166,11 @@ class Env:
         # save_image
         cv2.imwrite(save_path+"{}_{}.bmp".format(class_idx, num), self.state)
 
-        data = self.getl()[0:3] - self.obj_pos
-        with open(save_path + "{}_{}.txt".format(class_idx, num), "w") as f:   # (x, y, z, base angle)
-            f.write("{} {} {}".format(*data))
+        data = np.round(np.round(self.getl()[0:3], 4) - self.obj_pos, 5)
+
+        with open(save_path + "{}_{}.txt".format(class_idx, num), "w") as f:   # (x, y, z, angle, symm)
+            f.write("{} {} {} {} {}".format(*data, self.obj_angle, self.is_symm))
+
         self.max_num_list[class_idx] += 1
 
     def approaching(self, class_idx):
@@ -177,23 +181,29 @@ class Env:
             return
 
         else:
-            self.obj_pos = self.get_obj_pos(seg_img, class_idx)
+            self.obj_pos, self.obj_angle, self.is_symm = self.get_obj_pos(seg_img, class_idx)
 
             self.movej(INITIAL_POSE)    # Move to center
             self.movej(starting_pose, 1, 1)      # Move to starting position,
 
-            goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
+            if class_idx == 5 and (self.obj_pos[2] + 0.1) < 0:
+                goal = np.append(self.obj_pos + np.array([0, 0, 0.2]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+            else:
+                goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
+
+            self.movel(goal, 1, 1)
+            goal_joint = self.rob.getj()
 
             for _ in range(5):  # repeat
                 time.sleep(1)
-                self.movel(goal, 1, 1)
+                self.movej(goal_joint)   # joint base move
                 a_n = self.action_noise.noise()
                 a_n[4:] = 0
                 noisy_goal = self.rob.getj() + a_n
                 self.movej(noisy_goal, 1, 1)
                 self.state_update()            # local view
 
-                if self.opts.with_data_collecting:
+                if self.opts.with_data_collecting and self.obj_angle is not None:
                     self.store_data(self.target_cls)
 
             time.sleep(1)
@@ -207,7 +217,7 @@ class Env:
 
     def grasp(self):
         # Down move
-        self.obj_pos -= [0, 0, 0.05]  # subtract z-dummy 0.05
+        self.obj_pos -= [0, 0, 0.1]  # subtract z-dummy 0.05
         goal = np.append(self.obj_pos, self.getl()[3:])  # Initial point
         self.movel(goal)
 
@@ -221,7 +231,7 @@ class Env:
 
         remain_obj = self.segmentation_model.getPoints(seg, self.target_cls)
 
-        if self.gripper.DETECT_OBJ and remain_obj < 10:
+        if self.gripper.DETECT_OBJ and remain_obj.len() < 10:
             reward = 1
         else:
             reward = -1
@@ -254,6 +264,8 @@ class Env:
         self.done = False
 
         # reward = self.grasp()
+
+        # TODO : Reward
         reward = 1  # temp reward
 
         self.done = True
@@ -301,9 +313,11 @@ class Env:
 
         if safetymode == "NORMAL":
             pass
-        if safetymode == "PROTECTIVE_STOP":
+        elif safetymode == "PROTECTIVE_STOP":
+            print("Protective stopped !", file=sys.stderr)
             self._program_send("unlock protective stop\n")
-        if safetymode == "SAFEGUARD_STOP":
+        elif safetymode == "SAFEGUARD_STOP":
+            print("Safeguard stopped !", file=sys.stderr)
             self._program_send("close safety popup\n")
 
     def set_gripper(self, speed, force):
@@ -336,37 +350,43 @@ class Env:
 
         self.gripper_close()
 
-        pt = [[-0.25099, -0.45, -0.04704, -2.18848, -2.22941, 0.05679],
-              [0.25099, -0.45, -0.04704, -2.18848, -2.22941, 0.05679],
-              [0.26807, -0.340179, -0.04704, -2.18848, -2.22941, 0.05679],
-              [-0.26807, -0.340179, -0.04704, -2.18848, -2.22941, 0.05679],
-              [-0.26807, -0.217842, -0.05096, -0.01386,  3.08795, 0.39780],
-              [0.26807, -0.217842, -0.05096, -0.01386, 3.08795, 0.39780]]
+        pt = [[-0.213, -0.45, -0.0484, -2.18848, -2.22941, 0.05679],
+              [0.213, -0.45, -0.0484, -2.18848, -2.22941, 0.05679],
+              [0.213, -0.340179, -0.0484, -2.18848, -2.22941, 0.05679],
+              [-0.213, -0.340179, -0.0484, -2.18848, -2.22941, 0.05679],
+              [-0.213, -0.217842, -0.0484, -0.01386,  3.08795, 0.39780],
+              [0.213, -0.217842, -0.0484, -0.01386, 3.08795, 0.39780]]
 
-        dir_idx = np.random.randint(0, 4, 1)[0]
+        dir_idx = random.sample([0, 1, 2, 3], 1)  # 리스트에서 6개 추출
 
         dir = [[0, 1, 2, 3, 4, 5],
                [1, 0, 3, 2, 5, 4],
                [4, 5, 2, 3, 0, 1],
                [5, 4, 3, 2, 1, 0]]
 
-        for i, point in enumerate(dir[dir_idx]):
-            if i == 0:
-                pt_copy = copy.deepcopy(pt)
-                pt_copy[point][0] = pt_copy[point][0] + (0.05 * pow(-1, point + 1))
-                pt_copy[point][2] = pt_copy[point][2] + 0.05
-                self.movej(starting_pose)
-                self.movel(pt_copy[point])
-                pt_copy[point][2] = pt_copy[point][2] - 0.05
-                self.movel(pt_copy[point])
+        for idx in dir_idx:
+            self.bluetooth.write("1".encode())
+            self.bluetooth.write("1".encode())
 
-            else:
-                self.movel(pt[point])
+            time.sleep(1)
+            for i, point in enumerate(dir[idx]):
+                if i == 0:
+                    pt_copy = copy.deepcopy(pt)
+                    pt_copy[point][0] = pt_copy[point][0] + (0.05 * pow(-1, point + 1))
+                    pt_copy[point][2] = pt_copy[point][2] + 0.05
+                    self.movej(starting_pose)
+                    self.movel(pt_copy[point])
+                    pt_copy[point][2] = pt_copy[point][2] - 0.05
+                    self.movel(pt_copy[point])
+                else:
+                    self.movel(pt[point])
 
-        self.bluetooth.write("1".encode())
+            self.movej(starting_pose)
+
         self.movej(starting_pose)
+
         self.movej(HOME)
-        time.sleep(4)  # waiting
+        # time.sleep(3)  # waiting
 
     def get_camera(self, camera_num):
         if camera_num == 1:
@@ -398,10 +418,12 @@ class Env:
         pxl_list = self.segmentation_model.getPoints(segmented_image, class_idx)  # Get pixel list
         xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
 
-        return xyz
+        angle, symm = self.segmentation_model.get_angle(segmented_image, class_idx)
+
+        return [xyz, angle, symm]
 
     def set_tcp(self, tcp):
         self.rob.set_tcp(tcp)
 
     def shutdown(self):
-        pass
+        self._program_send("Shutting down")
