@@ -2,8 +2,6 @@
 For grasping using IK v2, data collect for pre-training
 with calibration, segmentation
 
-# # Data Collector # # #
-
 latest Ver.171109
 """
 
@@ -82,6 +80,7 @@ class Env:
         # Robot
         self.acc = 1.5
         self.vel = 1.5
+        self.available = True
 
         # Variables
         self.opts = opts
@@ -96,23 +95,29 @@ class Env:
         self.state_shape = (self.render_height, self.render_width, 3)
         self.state = np.empty(self.state_shape, dtype=np.float32)
         self.internal_state = np.empty([6], dtype=np.float32)
-        self.action_noise = OUNoise(6, 0, theta=0.2, sigma=0.04)
-
 
         # Action Dim
-        self.action_dim = opts.action_dim    # 1dim?
+        self.action_dim = opts.action_dim    # 1 dim.
 
         # object position
         self.target_cls = 0
         self.obj_pos = np.zeros([3])         # (x, y, z)
         self.depth_f = np.zeros([1])
+        self.eigen_value = np.zeros([2])
+
+        # maximum and minimum angles of the 6-th joint for orienting task
+        self.max_ori = -100
+        self.min_ori = 100
+
 
         # Make directory for save Data Path
         # DATA SAVER FOR PRE-TRAINING
         if self.opts.with_data_collecting:
             self.path_element = []
             self.max_num_list = []
-            dir_path = "E:\\local_pre-set\\"
+            #self.max_num_list = np.zeros([10], dtype= np.uint8)
+            dir_path = "E:\\save_data_ik_v2\\"
+
             [self.path_element.append(dir_path + str(x) + "\\") for x in np.arange(10)]
             if not os.path.exists(dir_path):
                 [os.makedirs(x) for x in self.path_element]
@@ -137,143 +142,295 @@ class Env:
             else:
                 self.max_num_list.append(1)
 
-    def state_update(self):
-        self.state = np.asarray(self.get_camera(2))
+    def state_update(self):   # State : Local Camera View
+        self.state = np.asarray(self.local_cam.snap())
 
     def set_segmentation_model(self, segmentation_model):
         self.segmentation_model = segmentation_model
 
-    def reset(self):
-        """
-        Robot Reset
-        :return: state
-        """
+    def reset(self, target_cls):
         self.movej(HOME)
-        self.gripper.open()
 
         # Approaching
-        for target_obj_idx in range(9):
-            self.movej(HOME)
-            time.sleep(2)
-            self.approaching(target_obj_idx)             # robot move
+        self.approaching(target_cls)             # robot move
+
+        if self.obj_pos is None or self.obj_pos[2] > 1.5:  # 1.5는 로봇 기준 에러 난 z축 위치 스킵 하는거 추가하자.
+            return None
+
+        self.state_update()                      # local view
+        self.internal_state_update()             # Internal State Update. Last joint angles
+
+        if self.opts.with_data_collecting:
+            self.store_data(self.target_cls)
 
         return np.copy(self.state)
 
     def store_data(self, class_idx):
-        save_path = self.path_element[class_idx]
-        num = self.max_num_list[class_idx]
+        if self.available is True:
+            save_path = self.path_element[class_idx]
+            num = self.max_num_list[class_idx]
 
-        # save_image
-        cv2.imwrite(save_path+"{}_{}.bmp".format(class_idx, num), self.state)
+            # save_image
+            cv2.imwrite(save_path+"{}_{}.bmp".format(class_idx, num), self.state)
 
-        data = np.round(np.round(self.getl()[0:3], 4) - self.obj_pos, 5)
+            data = np.round(np.round(self.getl()[0:3], 4) - self.obj_pos, 5)
 
-        with open(save_path + "{}_{}.txt".format(class_idx, num), "w") as f:   # (x, y, z, angle, symm)
-            f.write("{} {} {} {} {}".format(*data, self.obj_angle, self.is_symm))
+            with open(save_path + "{}_{}.txt".format(class_idx, num), "w") as f:   # (x, y, z, angle, symm)
+                f.write("{} {} {} {} {}".format(*data, *self.eigen_value))
 
-        self.max_num_list[class_idx] += 1
+            self.max_num_list[class_idx] += 1
 
     def approaching(self, class_idx):
-        seg_img = self.get_seg()
+        seg_img, color_seg_img = self.get_seg()
+
+        # cv2.imwrite("test.bmp", seg_img)
+        cv2.imshow("color_seg_img", color_seg_img)
+        cv2.waitKey(10)
 
         # if the target class not exist, pass
         if class_idx not in np.unique(seg_img):
+            print("Failed to find %s" % OBJ_LIST[class_idx], file=sys.stderr)
+            self.obj_pos = None
             return
 
         else:
-            self.obj_pos, self.obj_angle, self.is_symm = self.get_obj_pos(seg_img, class_idx)
+            self.obj_pos, self.eigen_value = self.get_obj_pos(seg_img, class_idx)
 
-            self.movej(INITIAL_POSE)    # Move to center
+            if self.obj_pos is None:
+                return
+
             self.movej(starting_pose, 1, 1)      # Move to starting position,
 
             if class_idx == 5 and (self.obj_pos[2] + 0.1) < 0:
-                goal = np.append(self.obj_pos + np.array([0, 0, 0.2]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+                goal = np.append(self.obj_pos + np.array([0, 0, 0.23]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
             else:
                 goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
 
             self.movel(goal, 1, 1)
-            goal_joint = self.rob.getj()
-
-            for _ in range(5):  # repeat
-                time.sleep(1)
-                self.movej(goal_joint)   # joint base move
-                a_n = self.action_noise.noise()
-                a_n[4:] = 0
-                noisy_goal = self.rob.getj() + a_n
-                self.movej(noisy_goal, 1, 1)
-                self.state_update()            # local view
-
-                if self.opts.with_data_collecting and self.obj_angle is not None:
-                    self.store_data(self.target_cls)
-
-            time.sleep(1)
-            self.movel(goal, 1, 1)
-
-            self.state_update()  # local view
-            self.internal_state_update()  # Internal State Update. Last joint angles
-
-            if self.opts.with_data_collecting:
-                self.store_data(self.target_cls)
 
     def grasp(self):
         # Down move
-        self.obj_pos -= [0, 0, 0.1]  # subtract z-dummy 0.05
+        # 수정해야함
+        a = self.obj_pos  # 확인 하기
         goal = np.append(self.obj_pos, self.getl()[3:])  # Initial point
-        self.movel(goal)
-
-        self.gripper_close()
+        # 내리고
+        self.movel(goal, 0.5, 0.5)
+        self.gripper_close()  # 닫고
 
         # Move to position
         self.movej(starting_pose)
         self.movej(np.append(np.array([1.57]), self.getj()[1:]))
 
-        seg = self.get_seg()
+        # 물건 남아 있는지 확인
+        seg, _ = self.get_seg()
 
-        remain_obj = self.segmentation_model.getPoints(seg, self.target_cls)
+        if self.target_cls in np.unique(seg):
+            print("Failed Grasping..")
 
-        if self.gripper.DETECT_OBJ and remain_obj.len() < 10:
-            reward = 1
+        # TODO : Reward 를 준다면?
+        # if self.gripper.DETECT_OBJ and remain_obj.len() < 10:
+        #     reward = 1
+        # else:
+        #     reward = -1
+
+#        return reward
+
+    def calc_reward_for_orienting_task(self):
+        target_object_orientation, symm = self.segmentation_model.get_angle(self.target_cls)
+        target_object_orientation = np.rad2deg(target_object_orientation)
+        target_boxed_angle = self.segmentation_model.get_boxed_angle(self.target_cls)
+
+        joint1_orientation = np.rad2deg(self.getj()[0])
+        joint1_orientation = joint1_orientation - 90
+        joint6_orientation = -1 * np.rad2deg(self.getj()[-1])
+        current_joint6_orientation = joint1_orientation + joint6_orientation
+
+        if symm == 1 and self.target_cls not in [0, 7]:
+            shape = (4)
+            target_object_orientation = target_boxed_angle
+            target_object_orientations = np.zeros(shape=shape)
+            target_object_orientations[0] = target_object_orientation
+
+            if target_object_orientation >= -180 and target_object_orientation < -90:
+                target_object_orientations[1] = target_object_orientation + 90
+                target_object_orientations[2] = target_object_orientation + 180
+                target_object_orientations[3] = target_object_orientation + 270
+            if target_object_orientation >= -90 and target_object_orientation < 0:
+                target_object_orientations[1] = target_object_orientation + 90
+                target_object_orientations[2] = target_object_orientation + 180
+                target_object_orientations[3] = target_object_orientation - 89
+            if target_object_orientation >= 0 and target_object_orientation < 90:
+                target_object_orientations[1] = target_object_orientation + 90
+                target_object_orientations[2] = target_object_orientation - 90
+                target_object_orientations[3] = target_object_orientation - 179
+            if target_object_orientation >= 90 and target_object_orientation < 180:
+                target_object_orientations[1] = target_object_orientation - 90
+                target_object_orientations[2] = target_object_orientation - 180
+                target_object_orientations[3] = target_object_orientation - 269
+
+            abs_diffs = abs(target_object_orientations - current_joint6_orientation)
+            index = np.argmin(abs_diffs)
+            target_object_orientation = target_object_orientations[index]
+            dist = abs_diffs[index] / 180
+            print("Target orientation : {}, Joint6_orientation : {}".format(target_object_orientation, current_joint6_orientation))
+
+        elif self.target_cls in [0, 7] and symm == 1:
+            target_object_orientation = 0
+            diff = target_object_orientation - current_joint6_orientation
+            dist = abs(diff) / 180
+            print("Target orientation : {}, Joint6_orientation : {}".format(target_object_orientation, current_joint6_orientation))
         else:
-            reward = -1
+            target_object_orientations = np.zeros(shape=(2))
+            target_object_orientation = target_boxed_angle
+            target_object_orientations[0] = target_object_orientation
 
-        return reward
+            if target_object_orientation <= 0:
+                target_object_orientations[1] = target_object_orientation + 179
+            else:
+                target_object_orientations[1] = target_object_orientation - 179
 
-    def step(self, action, exploration_noise, is_training):
+            diffs = target_object_orientations - current_joint6_orientation
+            abs_diffs = abs(diffs)
+            index = np.argmin(abs_diffs)
+            target_object_orientation = target_object_orientations[index]
+
+            print("Target orientation : {}, Joint6_orientation : {}".format(target_object_orientation, current_joint6_orientation))
+            dist = abs_diffs[index] / 180
+
+        return dist * -0.5
+
+    def calc_max_min_orientation_for_orienting_task(self):
+        target_object_orientation, symm = self.segmentation_model.get_angle(self.target_cls)
+        target_boxed_angle = self.segmentation_model.get_boxed_angle(self.target_cls)
+
+        if symm is not None:
+            # target_object_orientation = np.rad2deg(target_object_orientation)
+            joint1_orientation = np.rad2deg(self.getj()[0])
+            joint1_orientation = joint1_orientation - 90
+            joint6_orientation = -1 * np.rad2deg(self.getj()[-1])
+            current_joint6_orientation = joint1_orientation + joint6_orientation
+
+            if symm == 1 and self.target_cls not in [0, 7]:
+                shape = (4)
+                target_object_orientation = target_boxed_angle
+                target_object_orientations = np.zeros(shape=shape)
+                target_object_orientations[0] = target_object_orientation
+
+                if target_object_orientation >= -180 and target_object_orientation < -90:
+                    target_object_orientations[1] = target_object_orientation + 90
+                    target_object_orientations[2] = target_object_orientation + 180
+                    target_object_orientations[3] = target_object_orientation + 270
+                if target_object_orientation >= -90 and target_object_orientation < 0:
+                    target_object_orientations[1] = target_object_orientation + 90
+                    target_object_orientations[2] = target_object_orientation + 180
+                    target_object_orientations[3] = target_object_orientation - 89
+                if target_object_orientation >= 0 and target_object_orientation < 90:
+                    target_object_orientations[1] = target_object_orientation + 90
+                    target_object_orientations[2] = target_object_orientation - 90
+                    target_object_orientations[3] = target_object_orientation - 179
+                if target_object_orientation >= 90 and target_object_orientation < 180:
+                    target_object_orientations[1] = target_object_orientation - 90
+                    target_object_orientations[2] = target_object_orientation - 180
+                    target_object_orientations[3] = target_object_orientation - 269
+
+                diffs = target_object_orientations - current_joint6_orientation
+                abs_diffs = abs(diffs)
+                index = np.argmin(abs_diffs)
+                target_object_orientation = target_object_orientations[index]
+
+            elif self.target_cls in [0, 7] and symm == 1:
+                target_object_orientation = 0
+            else:
+                shape = (2)
+                target_object_orientation = target_boxed_angle
+                target_object_orientations = np.zeros(shape=shape)
+                target_object_orientations[0] = target_object_orientation
+
+                if target_object_orientation <= 0:
+                    target_object_orientations[1] = target_object_orientation + 179
+                else:
+                    target_object_orientations[1] = target_object_orientation - 179
+
+                diffs = target_object_orientations - current_joint6_orientation
+                abs_diffs = abs(diffs)
+                index = np.argmin(abs_diffs)
+                target_object_orientation = target_object_orientations[index]
+
+            if current_joint6_orientation > target_object_orientation:
+                self.max_ori = np.deg2rad(-joint6_orientation -1 * (target_object_orientation - 25) )
+                self.min_ori = np.deg2rad(-joint6_orientation)
+            else:
+                self.max_ori = np.deg2rad(-joint6_orientation)
+                self.min_ori = np.deg2rad(-joint6_orientation -1 * (target_object_orientation + 25) )
+
+            return True
+        else:
+            return False
+
+    def step(self, action, exploration_noise, num_step, is_training):
         target_angle = self.getj()[5] + action
         is_terminal = True
+        self.available = True
+        reward = 0
+        actual_action = 0
 
         if is_training:
             noise = exploration_noise.noise() / 2
         else:
             noise = 0
 
-        min_ori = -1.570796326
-        max_ori = 1.570796326
+        if num_step == 1:
+            self.available = self.calc_max_min_orientation_for_orienting_task()
 
-        if min_ori > target_angle:
-            action = np.abs(target_angle - min_ori) + action + abs(noise)
-        elif target_angle > max_ori:
-            action = action - np.abs(target_angle - max_ori) - abs(noise)
+        if self.available:
+            if num_step == 1:
+                if self.min_ori > target_angle:
+                    if self.min_ori - target_angle > 0.4:  # 23 degree
+                        old_max = self.max_ori
+                        self.max_ori = self.min_ori
+                        self.min_ori = self.min_ori - (old_max - self.min_ori)
 
-        target_angle = self.getj()[5] + action
+                if self.max_ori < target_angle:
+                    if target_angle - self.max_ori > 0.4: # 23 degree
+                        old_min = self.min_ori
+                        self.min_ori = self.max_ori
+                        self.max_ori = self.max_ori + (self.max_ori - old_min)
 
-        target_angle = np.append(self.getj()[:-1], target_angle)    # 6dim.
 
-        actual_action = action
-        self.movej(target_angle)                                   # Real robot move to goal
-        self.done = False
+            if self.min_ori > target_angle:
+                action = np.abs(target_angle - self.min_ori) + action + abs(noise)
 
-        # reward = self.grasp()
+            if target_angle > self.max_ori:
+                action = action - np.abs(target_angle - self.max_ori) - abs(noise)
+
+            target_angle = self.getj()[5] + action
+
+            target_angle = np.append(self.getj()[:-1], target_angle)    # 6dim.
+
+            actual_action = action
+            self.movej(target_angle)                                   # Real robot move to goal
+            self.done = False
+
+            reward = self.calc_reward_for_orienting_task()
+
+            self.state_update()
 
         # TODO : Reward
-        reward = 1  # temp reward
+        # reward = self.grasp()
 
-        self.done = True
-
-        return np.copy(self.state), reward, actual_action, self.done, is_terminal
+        return np.copy(self.state), reward, actual_action, self.done, is_terminal, self.available
 
     def internal_state_update(self):    # last joint angle
-        self.internal_state = np.array([-1.0, -0.5, 0, 0.5, 1]) * self.getj()[-1]
+        internal_state = []
+
+        # Current angles 5 * 6 = 30
+        for idx in range(6):
+            internal_state.extend(np.array([-1.0, -0.5, 0, 0.5, 1]) - self.getj()[idx])
+
+        # 30 + 3 e.e pose.
+        internal_state.extend(self.getl()[0:3])
+
+        self.internal_state = np.array(internal_state)
 
     def getl(self):
         return np.array(self.rob.getl())
@@ -289,6 +446,8 @@ class Env:
             self.rob.movej(goal_pose, acc, vel)
         except urx.RobotException:
             self.status_chk()
+            self.movej(HOME, 1, 1)
+            self.available = False
 
     def movel(self, goal_pose, acc=1.2, vel=1.2):
         try:
@@ -319,6 +478,8 @@ class Env:
         elif safetymode == "SAFEGUARD_STOP":
             print("Safeguard stopped !", file=sys.stderr)
             self._program_send("close safety popup\n")
+        else:
+            print(safetymode)
 
     def set_gripper(self, speed, force):
         self.gripper.set_gripper(speed, force)
@@ -331,6 +492,8 @@ class Env:
 
     def shuffle_obj(self):
         self.movej(HOME)
+
+        self.gripper_close()
 
         # Tray Control
         # #self.movej(shf_way_pt[0])  # random
@@ -386,12 +549,9 @@ class Env:
         self.movej(starting_pose)
 
         self.movej(HOME)
-        # time.sleep(3)  # waiting
+        self.gripper_open()
 
     def get_camera(self, camera_num):
-        if camera_num == 1:
-            return self.global_cam.snap()
-
         if camera_num == 2:
             return self.local_cam.snap()
 
@@ -404,23 +564,21 @@ class Env:
         return OBJ_LIST[object_index]
 
     def get_seg(self):
-        time.sleep(4)
         img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
         padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)  # Color fmt    RGB -> BGR
+        cv2.imshow("Input_image", padded_img)
 
         # Run Network.
         return self.segmentation_model.run(padded_img)
 
     def get_obj_pos(self, segmented_image, class_idx):  # TODO : class 0~8 repeat version
         self.target_cls = class_idx
-        print(self.get_obj_name(class_idx))
+        print(">> Target Object : ", self.get_obj_name(class_idx), file=sys.stderr)
 
-        pxl_list = self.segmentation_model.getPoints(segmented_image, class_idx)  # Get pixel list
+        pxl_list, eigen_value = self.segmentation_model.getData(segmented_image, class_idx)  # Get pixel list
         xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
 
-        angle, symm = self.segmentation_model.get_angle(segmented_image, class_idx)
-
-        return [xyz, angle, symm]
+        return [xyz, eigen_value]
 
     def set_tcp(self, tcp):
         self.rob.set_tcp(tcp)
