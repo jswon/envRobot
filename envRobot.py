@@ -2,7 +2,7 @@
 For grasping using IK v2, data collect for pre-training
 with calibration, segmentation
 
-latest Ver.171120
+latest Ver.171204
 """
 
 # Robot
@@ -82,7 +82,6 @@ class Env:
         self.acc = 3
         self.vel = 3
         self.available = True
-        self.unreachable = False
 
         # Variables
         self.opts = opts
@@ -200,27 +199,19 @@ class Env:
             self.obj_pos, self.eigen_value = self.get_obj_pos(class_idx)
 
             if self.obj_pos is None:
-                self.unreachable = True
-            elif (self.obj_pos[0] < -0.306) and (self.obj_pos[1] < - 0.420):
-                self.unreachable = True
-            elif (self.obj_pos[0] > 0.292) and (self.obj_pos[1] < - 0.420):
-                self.unreachable = True
-
-            self.movej(starting_pose, a, v)      # Move to starting position,
-
-            if self.obj_pos is None:
                 return
 
-            if class_idx == 5 and self.obj_pos[2] < -0.07:
-                goal = np.append(self.obj_pos + np.array([0, 0, 0.15]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+            if (self.obj_pos[0] > -0.297) and (self.obj_pos[0] < 0.3034) and (self.obj_pos[1] > -0.4367) and (self.obj_pos[1] < -0.220):  # 250 안된
+                self.movej(starting_pose, a, v)      # Move to starting position,
+
+                if class_idx == 5 and self.obj_pos[2] < -0.1:
+                    goal = np.append(self.obj_pos + np.array([0, 0, 0.30]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+                else:
+                    goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
+
+                self.movel(goal, self.acc, self.vel)
             else:
-                goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
-
-            self.movel(goal, self.acc, self.vel)
-
-            if self.unreachable:
                 self.obj_pos = None
-                self.unreachable = False
 
     def grasp(self, target_cls):
         self.obj_pos[2] = -0.056
@@ -435,7 +426,6 @@ class Env:
             self.rob.movel(goal_pose, acc, vel)
         except urx.RobotException:
             self.status_chk()
-            self.unreachable = True
 
     def _program_send(self, cmd):
         self.Dashboard_socket.send(cmd.encode())
@@ -491,11 +481,11 @@ class Env:
             self.gripper.move(104)
             self.movej(shf_pt[0], self.acc, self.vel)
             self.gripper.open()
-            # self.movej(starting_pose, self.acc, self.vel)
 
         # MIX TRAY
+        is_shuffle = input("shuffle ? ")
 
-        if not self.opts.num_eval > 0:
+        if is_shuffle == "1":
             self.gripper_close()
 
             pt = [[-0.20, -0.45, -0.0484, -2.18848, -2.22941, 0.05679],
@@ -530,8 +520,9 @@ class Env:
 
                 self.movej(starting_pose, self.acc, self.vel)
                 self.gripper_open()
-
-        # self.movej(starting_pose, self.acc, self.vel)
+        else:
+            print("Hand Mix")
+            time.sleep(2)
 
         self.movej(HOME, self.acc, self.vel)
 
@@ -539,7 +530,6 @@ class Env:
         time.sleep(0.2)
         img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
         padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)  # Color fmt    RGB -> BGR
-        # cv2.imshow("Input_image", padded_img)
 
         return self.seg_model.run(padded_img)
 
