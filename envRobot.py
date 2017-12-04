@@ -1,7 +1,7 @@
 """
 Vision based object grasping
 
-latest Ver.171120
+latest Ver.171204
 """
 
 # Robot
