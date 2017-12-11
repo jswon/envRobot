@@ -2,7 +2,7 @@
 For grasping using IK v2, data collect for pre-training
 with calibration, segmentation
 
-latest Ver.171204
+latest Ver.171120
 """
 
 # Robot
@@ -143,9 +143,14 @@ class Env:
 
     def state_update(self):   # State : Local Camera View
         img = self.local_cam.snap()
-        self.state = np.asarray(img)
 
-        cv2.imshow("image", self.state)
+        if np.array_equal(img, self.state):
+            print("Camera connection error", file=sys.stderr)
+            self.local_cam = UEyeCam()  # Local Camera
+            self.state = self.local_cam.snap()
+        else:
+            self.state = img
+            cv2.imshow("image", self.state)
 
     def set_segmentation_model(self, segmentation_model):
         self.seg_model = segmentation_model
@@ -189,6 +194,8 @@ class Env:
         cv2.imshow("color_seg_img", color_seg_img)
         cv2.waitKey(10)
 
+        print(">> Target Object : ", OBJ_LIST[class_idx], file=sys.stderr)
+
         # if the target class not exist, pass
         if class_idx not in np.unique(seg_img):
             print("Failed to find %s" % OBJ_LIST[class_idx], file=sys.stderr)
@@ -201,15 +208,42 @@ class Env:
             if self.obj_pos is None:
                 return
 
-            if (self.obj_pos[0] > -0.297) and (self.obj_pos[0] < 0.3034) and (self.obj_pos[1] > -0.4367) and (self.obj_pos[1] < -0.220):  # 250 안된
+            if (self.obj_pos[0] > -0.297) and (self.obj_pos[0] < 0.3034) and (self.obj_pos[1] > -0.427) and (self.obj_pos[1] < -0.226):
+                detached_obj = self.detach_obj(class_idx)
+
                 self.movej(starting_pose, a, v)      # Move to starting position,
 
+                self.obj_pos[1] -= 0.015
                 if class_idx == 5 and self.obj_pos[2] < -0.1:
                     goal = np.append(self.obj_pos + np.array([0, 0, 0.30]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
                 else:
                     goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
 
                 self.movel(goal, self.acc, self.vel)
+
+                if detached_obj > 0:
+                    self.obj_pos[2] = -0.035
+                    goal = np.append(self.obj_pos, self.getl()[3:])  # Initial point
+                    self.movel(goal, self.acc, self.vel)
+
+                    for _ in range(3):
+                        # Left
+                        goal = np.append(self.obj_pos + np.array([+0.03, 0, 0]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+                        self.movel(goal, self.acc, self.vel)
+
+                        # Right
+                        goal = np.append(self.obj_pos + np.array([-0.03, 0, 0]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+                        self.movel(goal, self.acc, self.vel)
+
+                    self.obj_pos[2] += 0.1
+                    goal = np.append(self.obj_pos, self.getl()[3:])  # Initial point
+                    self.movel(goal, self.acc, self.vel)
+                    self.movej(HOME, self.acc, self.vel)
+
+                    detached_obj = self.detach_obj(class_idx)
+
+                    if detached_obj > 0:
+                        self.obj_pos = None
             else:
                 self.obj_pos = None
 
@@ -334,7 +368,6 @@ class Env:
         return plus_or_minus_angle_code, move_to_plus_angle
 
     def calc_reward_for_orienting_task(self, cost):
-
         joint1_orientation = np.rad2deg(self.getj()[0])
         joint1_orientation = joint1_orientation - 90
         joint6_orientation = -1 * np.rad2deg(self.getj()[-1])
@@ -463,6 +496,28 @@ class Env:
     def gripper_open(self):
         self.gripper.open()
 
+    def detach_obj(self, target_cls):
+        _, _ = self.get_seg()
+
+        obj_list = np.arange(0, 9)
+        obj_list = np.delete(obj_list, target_cls)
+
+        # get target object position
+        target_xy, _ = self.get_obj_pos(target_cls)  # x, y
+
+        for idx in range(9):
+            idx_xy, _ = self.get_obj_pos(idx)
+            dist = np.linalg.norm(target_xy[:-1] - idx_xy[:-1])
+            # OBJ_LIST = ['O_00_Black_Tape', 'O_01_Glue', 'O_02_Big_USB', 'O_03_Glue_Stick', 'O_04_Big_Box','O_05_Red_Cup', 'O_06_Small_Box', 'O_07_White_Tape', 'O_08_Small_USB', 'O_09_Yellow_Cup']
+
+            if dist > 0.05:    # gripper_width/2
+                obj_list = np.delete(obj_list, np.argwhere(obj_list == idx))
+            else:
+                pass
+
+        print(obj_list)
+        return obj_list.shape[0]
+
     def shuffle_obj(self):
         self.movej(HOME, self.acc, self.vel)
 
@@ -483,17 +538,15 @@ class Env:
             self.gripper.open()
 
         # MIX TRAY
-        is_shuffle = input("shuffle ? ")
+        # is_shuffle = input("shuffle ? ")
+        is_shuffle = "1"
 
         if is_shuffle == "1":
             self.gripper_close()
 
-            pt = [[-0.20, -0.45, -0.0484, -2.18848, -2.22941, 0.05679],
-                  [0.20, -0.45, -0.0484, -2.18848, -2.22941, 0.05679],
-                  [0.20, -0.340179, -0.0484, -2.18848, -2.22941, 0.05679],
-                  [-0.20, -0.340179, -0.0484, -2.18848, -2.22941, 0.05679],
-                  [-0.20, -0.217842, -0.0484, -0.01386,  3.08795, 0.39780],
-                  [0.20, -0.217842, -0.0484, -0.01386, 3.08795, 0.39780]]
+            pt = [[-0.20, -0.45,     -0.0484, -2.18848, -2.22941, 0.05679], [ 0.20, -0.45,     -0.0484, -2.18848, -2.22941, 0.05679],
+                  [ 0.20, -0.340179, -0.0484, -2.18848, -2.22941, 0.05679], [-0.20, -0.340179, -0.0484, -2.18848, -2.22941, 0.05679],
+                  [-0.20, -0.217842, -0.0484, -0.01386,  3.08795, 0.39780], [ 0.20, -0.217842, -0.0484, -0.01386,  3.08795, 0.39780]]
 
             dir_idx = random.sample([0, 1, 2, 3], 1)  # 리스트에서 6개 추출
 
@@ -518,13 +571,12 @@ class Env:
                     else:
                         self.movel(pt[point])
 
-                self.movej(starting_pose, self.acc, self.vel)
-                self.gripper_open()
         else:
             print("Hand Mix")
             time.sleep(2)
 
         self.movej(HOME, self.acc, self.vel)
+        self.gripper_open()
 
     def get_seg(self):
         time.sleep(0.2)
@@ -535,7 +587,6 @@ class Env:
 
     def get_obj_pos(self, class_idx):  # TODO : class 0~8 repeat version
         self.target_cls = class_idx
-        print(">> Target Object : ", OBJ_LIST[class_idx], file=sys.stderr)
 
         pxl_list, eigen_value = self.seg_model.getData(class_idx)  # Get pixel list
 
