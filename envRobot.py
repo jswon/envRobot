@@ -1,20 +1,17 @@
 """
 Vision based object grasping
 
-latest Ver.171204
+latest Ver.171212
 """
 
 # Robot
 from Kinect_Snap import *
-from pyueye import *
 import socket
 import pyGrip
 
 # utils
-import copy
 import cv2
 import serial
-import random
 
 from util import *
 
@@ -69,7 +66,6 @@ class Env:
 
         # Camera interface
         self.global_cam = Kinect()                         # Kinect Camera
-        self.use_seg = True
 
         # Segmentation Model
         self.seg_model = None
@@ -97,7 +93,6 @@ class Env:
         self.target_angle = 0
         # maximum and minimum angles of the 6-th joint for orienting task
 
-
         # Make directory for save Data Path
         # DATA SAVER FOR PRE-TRAINING
         if self.opts.with_data_collecting:
@@ -116,6 +111,9 @@ class Env:
         # Reset Environment
         self.set_tcp(self.default_tcp)
         self.movej(HOME)
+
+        self.x_boundary = [-0.297, 0.3034]
+        self.y_boundary = [-0.427, -0.226]
 
         print("Robot Environment Ready.", file=sys.stderr)
 
@@ -143,6 +141,8 @@ class Env:
         cv2.imshow("color_seg_img", color_seg_img)
         cv2.waitKey(10)
 
+        print(">> Target Object : ", OBJ_LIST[class_idx], file=sys.stderr)
+
         # if the target class not exist, pass
         if class_idx not in np.unique(seg_img):
             print("Failed to find %s" % OBJ_LIST[class_idx], file=sys.stderr)
@@ -150,26 +150,101 @@ class Env:
             return
 
         else:
-            self.obj_pos, self.eigen_value = self.get_obj_pos(seg_img, class_idx)
+            self.obj_pos, self.eigen_value = self.get_obj_pos(class_idx)
+            self.obj_pos[1] -= 0.015
 
-            # Safe zone
             if self.obj_pos is None:
                 return
 
-            if (self.obj_pos[0] > -0.297) and (self.obj_pos[0] < 0.3034) and (self.obj_pos[1] > -0.4367) and (self.obj_pos[1] < -0.23):
+            # Safe zone
+            if (self.obj_pos[0] > self.x_boundary[0]) and (self.obj_pos[0] < self.x_boundary[1]) and (self.obj_pos[1] > self.y_boundary[0]) and (self.obj_pos[1] < self.y_boundary[1]):
+                detached_obj_num = self.detach_obj(class_idx)
+
                 self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
 
-                if class_idx == 5 and (self.obj_pos[2] + 0.1) < 0:
+                if class_idx == 5 and self.obj_pos[2] < -0.1:
                     goal = np.append(self.obj_pos + np.array([0, 0, 0.30]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
                 else:
                     goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
 
                 self.movel(goal, self.acc, self.vel)
 
+                if detached_obj_num > 0:
+                    self.gripper.close(255, 255)
+
+                    if self.obj_pos[0] < 0:
+                        cur_j = self.getj() + [0, 0, 0, 0, -0.392, 0]
+                        self.movej(cur_j, self.acc, self.vel)
+
+                        l = self.getl()
+                        l[2] = -0.027
+                        self.movel(l, self.acc, self.vel)
+
+                        cur_j = self.getj() + [0, 0, 0, 0, +0.785, 0]
+                        self.movej(cur_j, self.acc, self.vel)
+
+                        cur_j = self.getj() + [0, 0, 0, 0, -0.785, 0]
+                        self.movej(cur_j, self.acc, self.vel)
+
+                    else:
+                        cur_j = self.getj() + [0, 0, 0, 0, 0.392, 0]
+                        self.movej(cur_j, self.acc, self.vel)
+
+                        l = self.getl()
+                        l[2] = -0.027
+                        self.movel(l, self.acc, self.vel)
+
+                        cur_j = self.getj() + [0, 0, 0, 0, -0.785, 0]
+                        self.movej(cur_j, self.acc, self.vel)
+
+                        cur_j = self.getj() + [0, 0, 0, 0, 0.785, 0]
+                        self.movej(cur_j, self.acc, self.vel)
+
+                    self.movej(HOME, self.acc, self.vel)
+                    self.gripper.open(255, 255)
+
+                    detached_obj = self.detach_obj(class_idx)
+
+                    if detached_obj > 0:
+                        self.obj_pos = None
+                    else:
+                        _, _ = self.get_seg()
+                        self.obj_pos, self.eigen_value = self.get_obj_pos(class_idx)
+                        self.obj_pos[1] -= 0.015
+
+                        self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
+
+                        if class_idx == 5 and self.obj_pos[2] < -0.1:
+                            goal = np.append(self.obj_pos + np.array([0, 0, 0.30]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+                        else:
+                            goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+
+                        self.movel(goal, self.acc, self.vel)
+
                 obj_ang = self.seg_model.get_boxed_angle(class_idx)
                 self.target_angle = np.rad2deg(self.getj()[-1]) - obj_ang
             else:
                 self.obj_pos = None
+
+    def detach_obj(self, target_cls):
+        temp_seg, _ = self.get_seg()
+
+        obj_list = np.unique(temp_seg)[:-1]
+        obj_list = np.delete(obj_list, np.argwhere(obj_list == target_cls))
+        temp_list = np.copy(obj_list)
+
+        # get target object position
+        target_xy, _ = self.get_obj_pos(target_cls)  # x, y
+
+        for idx in temp_list:
+            idx_xy, _ = self.get_obj_pos(idx)
+            dist = np.linalg.norm(target_xy[:-1] - idx_xy[:-1])
+            # OBJ_LIST = ['O_00_Black_Tape', 'O_01_Glue', 'O_02_Big_USB', 'O_03_Glue_Stick', 'O_04_Big_Box','O_05_Red_Cup', 'O_06_Small_Box', 'O_07_White_Tape', 'O_08_Small_USB', 'O_09_Yellow_Cup']
+
+            if dist > 0.055:    # gripper_width / 2 + @
+                obj_list = np.delete(obj_list, np.argwhere(obj_list == idx))
+
+        return obj_list.shape[0]
 
     def grasp(self, target_cls):
         # Target angle orienting
@@ -183,10 +258,7 @@ class Env:
         self.rob.movej(goal, self.acc, self.vel)
 
         # 내리고
-        print("cur obj_pos : ", self.obj_pos[2])
-
         self.obj_pos[2] = -0.058
-
         goal = np.append(self.obj_pos, self.getl()[3:])  # Initial point
 
         self.movel(goal, 0.5, 0.5)
@@ -195,15 +267,13 @@ class Env:
         # Move to starting_pose
         self.movej(starting_pose, self.acc, self.vel)
 
-        # Move to pose
+        # Move to obj fixed point
         self.movej(j_pt[target_cls], self.acc, self.vel)
 
         l = self.getl()
         l[2] -= 0.057
         self.movel(l, 1, 1)
-
         self.gripper_open()
-
         l = self.getl()
         l[2] += 0.057
         self.movel(l, 1, 1)
@@ -271,7 +341,6 @@ class Env:
         self.movej(HOME, a, v)
 
         # Tray Control
-        self.movej(starting_pose, a, v)
         self.movej(shf_pt[0], a, v)
         self.gripper.move(104)
         self.movej(shf_pt[1], a, v)
@@ -284,8 +353,6 @@ class Env:
         self.gripper.move(104)
         self.movej(shf_pt[0], a, v)
         self.gripper.open()
-
-
 
         # MIX TRAY
 
@@ -326,15 +393,8 @@ class Env:
         #
         # self.movej(starting_pose)
 
-        self.movej(HOME)
+        self.movej(HOME, a, v)
         self.gripper_open()
-
-    def teaching_mode(self):
-        pass
-
-    @staticmethod
-    def get_obj_name(object_index):
-        return OBJ_LIST[object_index]
 
     def get_seg(self):
         img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
@@ -343,11 +403,8 @@ class Env:
 
         return self.seg_model.run(padded_img)
 
-    def get_obj_pos(self, segmented_image, class_idx):  # TODO : class 0~8 repeat version
-        self.target_cls = class_idx
-        print(">> Target Object : ", self.get_obj_name(class_idx), file=sys.stderr)
-
-        pxl_list, eigen_value = self.seg_model.getData(segmented_image, class_idx)  # Get pixel list
+    def get_obj_pos(self, target_cls):  # TODO : class 0~8 repeat version
+        pxl_list, eigen_value = self.seg_model.getData(target_cls)  # Get pixel list
         xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
 
         return [xyz, eigen_value]
@@ -356,4 +413,4 @@ class Env:
         self.rob.set_tcp(tcp)
 
     def shutdown(self):
-        self._program_send("Shutting down")
+        self._program_send("Shutdown")
