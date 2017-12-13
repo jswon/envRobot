@@ -1,7 +1,7 @@
 """
 Vision based object grasping
 
-latest Ver.171212
+latest Ver.171213
 """
 
 # Robot
@@ -150,7 +150,9 @@ class Env:
             return
 
         else:
-            self.obj_pos, self.eigen_value = self.get_obj_pos(class_idx)
+            self.obj_pos, _ = self.get_obj_pos(class_idx)
+
+            # y축 보정
             self.obj_pos[1] -= 0.015
 
             if self.obj_pos is None:
@@ -158,8 +160,6 @@ class Env:
 
             # Safe zone
             if (self.obj_pos[0] > self.x_boundary[0]) and (self.obj_pos[0] < self.x_boundary[1]) and (self.obj_pos[1] > self.y_boundary[0]) and (self.obj_pos[1] < self.y_boundary[1]):
-                detached_obj_num = self.detach_obj(class_idx)
-
                 self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
 
                 if class_idx == 5 and self.obj_pos[2] < -0.1:
@@ -169,82 +169,10 @@ class Env:
 
                 self.movel(goal, self.acc, self.vel)
 
-                if detached_obj_num > 0:
-                    self.gripper.close(255, 255)
-
-                    if self.obj_pos[0] < 0:
-                        cur_j = self.getj() + [0, 0, 0, 0, -0.392, 0]
-                        self.movej(cur_j, self.acc, self.vel)
-
-                        l = self.getl()
-                        l[2] = -0.027
-                        self.movel(l, self.acc, self.vel)
-
-                        cur_j = self.getj() + [0, 0, 0, 0, +0.785, 0]
-                        self.movej(cur_j, self.acc, self.vel)
-
-                        cur_j = self.getj() + [0, 0, 0, 0, -0.785, 0]
-                        self.movej(cur_j, self.acc, self.vel)
-
-                    else:
-                        cur_j = self.getj() + [0, 0, 0, 0, 0.392, 0]
-                        self.movej(cur_j, self.acc, self.vel)
-
-                        l = self.getl()
-                        l[2] = -0.027
-                        self.movel(l, self.acc, self.vel)
-
-                        cur_j = self.getj() + [0, 0, 0, 0, -0.785, 0]
-                        self.movej(cur_j, self.acc, self.vel)
-
-                        cur_j = self.getj() + [0, 0, 0, 0, 0.785, 0]
-                        self.movej(cur_j, self.acc, self.vel)
-
-                    self.movej(HOME, self.acc, self.vel)
-                    self.gripper.open(255, 255)
-
-                    detached_obj = self.detach_obj(class_idx)
-
-                    if detached_obj > 0:
-                        self.obj_pos = None
-                    else:
-                        _, _ = self.get_seg()
-                        self.obj_pos, self.eigen_value = self.get_obj_pos(class_idx)
-                        self.obj_pos[1] -= 0.015
-
-                        self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
-
-                        if class_idx == 5 and self.obj_pos[2] < -0.1:
-                            goal = np.append(self.obj_pos + np.array([0, 0, 0.30]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
-                        else:
-                            goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
-
-                        self.movel(goal, self.acc, self.vel)
-
                 obj_ang = self.seg_model.get_boxed_angle(class_idx)
                 self.target_angle = np.rad2deg(self.getj()[-1]) - obj_ang
             else:
                 self.obj_pos = None
-
-    def detach_obj(self, target_cls):
-        temp_seg, _ = self.get_seg()
-
-        obj_list = np.unique(temp_seg)[:-1]
-        obj_list = np.delete(obj_list, np.argwhere(obj_list == target_cls))
-        temp_list = np.copy(obj_list)
-
-        # get target object position
-        target_xy, _ = self.get_obj_pos(target_cls)  # x, y
-
-        for idx in temp_list:
-            idx_xy, _ = self.get_obj_pos(idx)
-            dist = np.linalg.norm(target_xy[:-1] - idx_xy[:-1])
-            # OBJ_LIST = ['O_00_Black_Tape', 'O_01_Glue', 'O_02_Big_USB', 'O_03_Glue_Stick', 'O_04_Big_Box','O_05_Red_Cup', 'O_06_Small_Box', 'O_07_White_Tape', 'O_08_Small_USB', 'O_09_Yellow_Cup']
-
-            if dist > 0.055:    # gripper_width / 2 + @
-                obj_list = np.delete(obj_list, np.argwhere(obj_list == idx))
-
-        return obj_list.shape[0]
 
     def grasp(self, target_cls):
         # Target angle orienting
