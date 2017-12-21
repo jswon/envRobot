@@ -1,7 +1,6 @@
 """
 Vision based object grasping
-
-latest Ver.171213
+latest Ver.171221
 """
 
 # Robot
@@ -12,6 +11,7 @@ import pyGrip
 # utils
 import cv2
 import serial
+import itertools
 
 from util import *
 
@@ -62,7 +62,7 @@ class Env:
         self._program_send("")
 
         # Tray Control
-        self.bluetooth = serial.Serial("COM5", 9600, timeout=1)     # Tray
+        # self.bluetooth = serial.Serial("COM5", 9600, timeout=1)     # Tray
 
         # Camera interface
         self.global_cam = Kinect()                         # Kinect Camera
@@ -110,7 +110,16 @@ class Env:
 
         # Reset Environment
         self.set_tcp(self.default_tcp)
-        self.movej(HOME)
+        self.movej(HOME, self.vel, self.acc)
+
+        msg = input("Use detahcer? (T/F)")
+
+        self.use_detacher = False
+
+        if msg == "T":
+            self.use_detacher = True
+        else:
+            self.use_detacher = False
 
         self.x_boundary = [-0.297, 0.3034]
         self.y_boundary = [-0.427, -0.226]
@@ -135,22 +144,26 @@ class Env:
         self.movej(HOME, self.acc, self.vel)
         self.approaching(target_cls)             # robot move
 
-    def approaching(self, class_idx):
+    def approaching(self, target_cls):
         seg_img, color_seg_img = self.get_seg()
 
         cv2.imshow("color_seg_img", color_seg_img)
         cv2.waitKey(10)
 
-        print(">> Target Object : ", OBJ_LIST[class_idx], file=sys.stderr)
+        print(">> Target Object : ", OBJ_LIST[target_cls], file=sys.stderr)
 
+        if self.use_detacher:
+            self.detacher(seg_img, target_cls)
+
+        seg_img, color_seg_img = self.get_seg()
         # if the target class not exist, pass
-        if class_idx not in np.unique(seg_img):
-            print("Failed to find %s" % OBJ_LIST[class_idx], file=sys.stderr)
+        if target_cls not in np.unique(seg_img):
+            print("Failed to find %s" % OBJ_LIST[target_cls], file=sys.stderr)
             self.obj_pos = None
             return
 
         else:
-            self.obj_pos, _ = self.get_obj_pos(class_idx)
+            self.obj_pos, _ = self.get_obj_pos(target_cls)
 
             # y축 보정
             self.obj_pos[1] -= 0.015
@@ -162,14 +175,14 @@ class Env:
             if (self.obj_pos[0] > self.x_boundary[0]) and (self.obj_pos[0] < self.x_boundary[1]) and (self.obj_pos[1] > self.y_boundary[0]) and (self.obj_pos[1] < self.y_boundary[1]):
                 self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
 
-                if class_idx == 5 and self.obj_pos[2] < -0.1:
+                if target_cls == 5 and self.obj_pos[2] < -0.1:
                     goal = np.append(self.obj_pos + np.array([0, 0, 0.30]), [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
                 else:
                     goal = np.append(self.obj_pos + np.array([0, 0, 0.1]), [0, -3.14, 0])      # Initial point  Added z-dummy 0.05
 
                 self.movel(goal, self.acc, self.vel)
 
-                obj_ang = self.seg_model.get_boxed_angle(class_idx)
+                obj_ang = self.seg_model.get_boxed_angle(target_cls)
                 self.target_angle = np.rad2deg(self.getj()[-1]) - obj_ang
             else:
                 self.obj_pos = None
@@ -205,6 +218,312 @@ class Env:
         l = self.getl()
         l[2] += 0.057
         self.movel(l, 1, 1)
+
+    def detacher(self, seg, target_cls):
+        color_img = self.seg_model.convert_grey_label_to_color_label(seg)
+
+        attached_list = {"obj_list": [], "points": []}
+
+        obj_list = np.unique(seg)[:-1]
+        obj_list = np.delete(obj_list, np.argwhere(obj_list == target_cls))
+
+        center_xy = np.mean(np.argwhere(seg == target_cls), axis=0)
+        end_pt = [0, 0]
+        starting_pt = [0, 0]
+
+        for comp_idx in obj_list:
+            comp_xy = np.mean(np.argwhere(seg == comp_idx), axis=0)
+
+            if target_cls == 8:
+                threshold_pxl = 23
+            else:
+                threshold_pxl = 23
+
+            if np.linalg.norm(center_xy - comp_xy) < threshold_pxl:
+                attached_list['obj_list'].append(comp_idx)
+                attached_list['points'].append(comp_xy)
+
+        attached_list['num'] = attached_list['obj_list'].__len__()
+
+        if attached_list['num'] == 0:
+            return
+        elif attached_list['num'] == 1:
+            ccx, ccy = np.round(center_xy).astype(np.int)
+
+            pt = attached_list['points'][0]
+
+            center_temp = np.copy(center_xy)
+
+            pt[0] = 127 - pt[0]
+            center_temp[0] = 127 - center_temp[0]
+
+            angle = np.degrees(np.arctan2(pt[0] - center_temp[0], pt[1] - center_temp[1]))
+
+            angle = angle + 90
+            if angle > 180:
+                angle = angle + -360
+
+            theta = np.radians(angle)
+
+            new_x = center_xy[1] + 7 * np.cos(theta)
+            new_y = 127 - (center_temp[0] + 10 * np.sin(theta))
+
+            new_x = np.round(new_x).astype(np.int)  # goal_position
+            new_y = np.round(new_y).astype(np.int)
+
+            opposite_theta = np.radians([180]) + theta
+
+            r = 20
+
+            for w in range(128):
+                next1 = 0
+                start_x = new_x + (r + w) * np.cos(opposite_theta)
+                start_y = new_y - (r + w) * np.sin(opposite_theta)
+
+                start_xx = np.round(start_x).astype(np.int)
+                start_yy = np.round(start_y).astype(np.int)
+
+                for i in [-6, 0, 6]:
+                    for k in [-6, 0, 6]:
+                        if seg[start_yy + k, start_xx + i] != 10:
+                            next1 = 1
+
+                if next1 == 0:
+                    starting_pt = [int(start_yy), int(start_xx)]
+                    cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
+                    break
+
+            new_xx = np.round(new_x).astype(np.int)
+            new_yy = np.round(new_y).astype(np.int)
+
+            end_pt = [new_yy, new_xx]  # int
+
+        elif attached_list['num'] > 1:
+            ccx, ccy = np.round(center_xy).astype(np.int)
+
+            pt_list = np.arange(0, attached_list['points'].__len__())
+            pt_points = attached_list['points']
+
+            subset = list(itertools.combinations(pt_list, 2))
+            init_array = []
+            subset_angle = np.array(init_array)
+
+            for pt_1, pt_2 in subset:
+                temp_img = np.copy(color_img)
+
+                xy1 = pt_points[pt_1]
+                xy2 = pt_points[pt_2]
+
+                xy11 = np.round(xy1).astype(np.int)
+                xy22 = np.round(xy2).astype(np.int)
+
+                cv2.line(temp_img, (ccy, ccx), (xy11[1], xy11[0]), (255, 255, 255))
+                cv2.line(temp_img, (ccy, ccx), (xy22[1], xy22[0]), (255, 255, 255))
+
+                th1 = np.arctan2((xy2[0] - center_xy[0]), (xy2[1] - center_xy[1]))
+                th2 = np.arctan2((xy1[0] - center_xy[0]), (xy1[1] - center_xy[1]))
+
+                dtheta = np.abs(th1 - th2)
+                theta = np.min([dtheta, 6.28 - dtheta])
+                subset_angle = np.append(subset_angle, np.degrees(theta))
+
+            where_pt = 'none'  # 'inner' or 'outer'
+
+            for t_ang in subset_angle:
+                if attached_list['num'] == 2:
+                    where_pt = 'outer'
+                    target_angle = t_ang
+                    break
+
+                else:
+                    temp = np.copy(subset_angle)
+                    temp = np.delete(subset_angle, np.argwhere(temp == t_ang))
+
+                    for case in np.array(list(itertools.combinations(temp, attached_list['num'] - 1))):
+                        sum_others = np.round(np.sum(case))
+                        sum_all = t_ang + sum_others
+
+                        if 359 <= np.round(sum_all) < 361:
+                            where_pt = 'inner'
+                            target_angle = np.max(subset_angle)
+                            break
+
+                        else:
+                            if sum_others - 1 <= t_ang < sum_others + 1:
+                                where_pt = 'outer'
+                                target_angle = t_ang
+                                break
+
+                            elif sum_others - 1 <= 360 - t_ang < sum_others + 1:
+                                where_pt = 'inner'
+                                target_angle = t_ang
+                                break
+
+                if where_pt is not 'none':
+                    break
+
+            comb_idx = np.where(subset_angle == target_angle)[0]
+            pair = subset[comb_idx[0]]
+
+            a_pt = pt_points[pair[0]]
+            b_pt = pt_points[pair[1]]
+
+            a_pt[0] = 127 - a_pt[0]
+            b_pt[0] = 127 - b_pt[0]
+
+            center_temp = np.copy(center_xy)
+            center_temp[0] = 127 - center_temp[0]
+
+            a_angle = np.degrees(np.arctan2(a_pt[0] - center_temp[0], a_pt[1] - center_temp[1]))
+            b_angle = np.degrees(np.arctan2(b_pt[0] - center_temp[0], b_pt[1] - center_temp[1]))
+            base_angle = 0
+
+            # 작은놈이 기준.
+            if (a_angle > 0) and (b_angle > 0):
+                if a_angle > b_angle:
+                    base_angle = b_angle
+                else:
+                    base_angle = a_angle
+
+            # 둘 중 하나가 -1 일 때
+
+            if a_angle * b_angle < 0:
+                temp_angle_a = a_angle + target_angle / 2
+
+                if temp_angle_a > 180:
+                    temp_angle_a = -360 + temp_angle_a
+
+                temp_angle_b = b_angle - target_angle / 2
+
+                if temp_angle_b > 180:
+                    temp_angle_b = -360 + temp_angle_b
+
+                if -1 < temp_angle_a - temp_angle_b < 1:
+                    base_angle = a_angle
+                else:
+                    base_angle = b_angle
+
+            # 둘다 - 일때 더 작은놈이 기준.
+            if (a_angle < 0) and (b_angle < 0):
+                if a_angle > b_angle:
+                    base_angle = b_angle
+                else:
+                    base_angle = a_angle
+
+            if where_pt is "outer":
+                target_angle = (360 - target_angle) / 2
+
+                theta = base_angle - target_angle
+
+                if theta < -180:
+                    theta = 360 + theta
+
+                theta = np.radians(theta)
+
+                new_x = center_xy[1] + 7 * np.cos(theta)
+                new_y = 127 - (center_temp[0] + 7 * np.sin(theta))
+
+                new_xx = np.round(new_x).astype(np.int)
+                new_yy = np.round(new_y).astype(np.int)
+                end_pt = [new_yy, new_xx]  # int
+
+                cv2.line(color_img, (ccy, ccx), (new_xx, new_yy), (255, 255, 255))
+
+                # Find starting point
+                opposite_theta = np.radians([180]) + theta
+                r = 20
+
+                for w in range(128):
+                    next1 = 0
+
+                    start_x = new_x + (r + w) * np.cos(opposite_theta)
+                    start_y = new_y - (r + w) * np.sin(opposite_theta)
+
+                    start_xx = np.round(start_x).astype(np.int)
+                    start_yy = np.round(start_y).astype(np.int)
+
+                    for i in [-6, 0, 6]:
+                        for k in [-6, 0, 6]:
+                            if seg[start_yy + k, start_xx + i] != 10:
+                                next1 = 1
+
+                    if next1 == 0:
+                        starting_pt = [int(start_yy), int(start_xx)]
+                        cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
+                        break
+
+            elif where_pt is "inner":
+                target_angle = target_angle / 2
+                theta = base_angle + target_angle
+
+                if theta > 90:
+                    theta = -360 + theta
+
+                theta = np.radians(theta)
+
+                new_x = center_xy[1] + 10 * np.cos(theta)
+                new_y = 127 - (center_temp[0] + 10 * np.sin(theta))
+
+                # Find starting point
+                opposite_theta = np.radians([180]) + theta
+
+                r = 20
+
+                for w in range(128):
+                    next1 = 0
+
+                    start_x = new_x + (r + w) * np.cos(opposite_theta)
+                    start_y = new_y - (r + w) * np.sin(opposite_theta)
+
+                    start_xx = np.round(start_x).astype(np.int)
+                    start_yy = np.round(start_y).astype(np.int)
+
+                    for i in [-6, 0, 6]:
+                        for k in [-6, 0, 6]:
+                            if seg[start_yy + k, start_xx + i] != 10:
+                                next1 = 1
+
+                    if next1 == 0:
+                        starting_pt = [int(start_yy), int(start_xx)]
+                        cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
+                        break
+
+                new_xx = np.round(new_x).astype(np.int)
+                new_yy = np.round(new_y).astype(np.int)
+
+                end_pt = [new_yy, new_xx]
+                cv2.line(color_img, (ccy, ccx), (new_xx, new_yy), (255, 255, 255))
+
+        cv2.imshow("Dir complete", color_img)
+        cv2.waitKey(1)
+
+        cv2.imwrite("{}.bmp".format(target_cls), color_img)
+
+        # starting to end point
+        start_xyz = self.global_cam.color2xyz([starting_pt])
+        goal_xyz = self.global_cam.color2xyz([end_pt])  # patched image's averaging pose [x, y, z]
+
+        # y축 보정
+        goal_xyz[1] -= 0.015
+        start_xyz[1] -= 0.015
+
+        # z-Axis
+        goal_xyz[2] = -0.053
+        start_xyz[2] = -0.053
+
+        self.gripper_close(255)
+        self.movej(starting_pose, self.acc, self.vel)
+
+        move_start_pt = np.append(start_xyz, [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+        move_end_pt = np.append(goal_xyz, [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
+
+        self.movel(move_start_pt + np.array([0, 0, 0.15, 0, 0, 0]), 2, 2)
+        self.movel(move_start_pt, 2, 2)
+
+        self.movel(move_end_pt, 1, 1)
+        self.movel(move_end_pt + np.array([0, 0, 0.15, 0, 0, 0]), 2, 2)
+        self.movej(HOME, self.acc, self.vel)
+        self.gripper_open(255)
 
     def getl(self):
         return np.array(self.rob.getl())
@@ -258,11 +577,11 @@ class Env:
     def set_gripper(self, speed, force):
         self.gripper.set_gripper(speed, force)
 
-    def gripper_close(self):
-        self.gripper.close()
+    def gripper_close(self, spd=50, force=80):
+        self.gripper.close(spd, force)
 
-    def gripper_open(self):
-        self.gripper.open()
+    def gripper_open(self, spd=50, force=80):
+        self.gripper.open(spd, force)
 
     def shuffle_obj(self):
         a, v = [self.acc, self.vel]
@@ -272,7 +591,7 @@ class Env:
         self.movej(shf_pt[0], a, v)
         self.gripper.move(104)
         self.movej(shf_pt[1], a, v)
-        self.gripper.close()
+        self.gripper.close(255)
         self.movej(shf_pt[2], a, v)
         self.movej(shf_pt[3], a, v)
         time.sleep(1)
@@ -280,7 +599,7 @@ class Env:
         self.movej(shf_pt[1], a, v)
         self.gripper.move(104)
         self.movej(shf_pt[0], a, v)
-        self.gripper.open()
+        self.gripper.open(255)
 
         # MIX TRAY
 
@@ -323,6 +642,15 @@ class Env:
 
         self.movej(HOME, a, v)
         self.gripper_open()
+
+        msg = input("Use detacher? (T/F)")
+
+        if msg == 'T':
+            self.use_detacher = True
+        else:
+            self.use_detacher = False
+
+
 
     def get_seg(self):
         img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
