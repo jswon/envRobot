@@ -1,6 +1,9 @@
 """
 Vision based object grasping
-latest Ver.171221
+latest Ver.180102
+- Add a method that using dilation to find neighboring object
+- Add a solution for objects out of bounds
+
 """
 
 # Robot
@@ -112,8 +115,8 @@ class Env:
         self.set_tcp(self.default_tcp)
         self.movej(HOME, self.vel, self.acc)
 
-        msg = input("Use detahcer? (T/F)")
-
+        # msg = input("Use detahcer? (T/F)")
+        msg = True
         self.use_detacher = False
 
         if msg == "T":
@@ -153,7 +156,7 @@ class Env:
         print(">> Target Object : ", OBJ_LIST[target_cls], file=sys.stderr)
 
         if self.use_detacher:
-            self.detacher(seg_img, target_cls)
+            [self.detacher(seg_img, target_cls) for _ in range(3)]
 
         seg_img, color_seg_img = self.get_seg()
         # if the target class not exist, pass
@@ -172,7 +175,7 @@ class Env:
                 return
 
             # Safe zone
-            if (self.obj_pos[0] > self.x_boundary[0]) and (self.obj_pos[0] < self.x_boundary[1]) and (self.obj_pos[1] > self.y_boundary[0]) and (self.obj_pos[1] < self.y_boundary[1]):
+            if (self.x_boundary[0]< self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
                 self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
 
                 if target_cls == 5 and self.obj_pos[2] < -0.1:
@@ -219,7 +222,39 @@ class Env:
         l[2] += 0.057
         self.movel(l, 1, 1)
 
+    def path_gen(self, seg, new_x, new_y, theta):
+        starting_pt = [0, 0]
+        end_pt = [0, 0]
+
+        opposite_theta = np.radians([180]) + theta
+
+        r = 20
+
+        for w in range(128):
+            next1 = 0
+
+            start_x = new_x + (r + w) * np.cos(opposite_theta)
+            start_y = new_y - (r + w) * np.sin(opposite_theta)
+
+            start_xx = np.round(start_x).astype(np.int)
+            start_yy = np.round(start_y).astype(np.int)
+
+            for i in [-6, 0, 6]:
+                for k in [-6, 0, 6]:
+                    if seg[start_yy + k, start_xx + i] != 10:
+                        next1 = 1
+
+            if next1 == 0:
+                starting_pt = [int(start_yy), int(start_xx)]
+#                 cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
+                break
+
+        return starting_pt, end_pt
+
     def detacher(self, seg, target_cls):
+        pxl_boundary_x = [14, 241]
+        pxl_boundary_y = [14, 113]
+
         color_img = self.seg_model.convert_grey_label_to_color_label(seg)
 
         attached_list = {"obj_list": [], "points": []}
@@ -228,20 +263,37 @@ class Env:
         obj_list = np.delete(obj_list, np.argwhere(obj_list == target_cls))
 
         center_xy = np.mean(np.argwhere(seg == target_cls), axis=0)
-        end_pt = [0, 0]
-        starting_pt = [0, 0]
+        end_pt = [0., 0.]
+        starting_pt = [0., 0.]
 
-        for comp_idx in obj_list:
+        shape = (128, 256)
+        binary_image_array = np.zeros(shape=shape, dtype=np.uint8)
+        binary_image_array.fill(0)
+        target_cls_pointList = self.seg_model.getPoints(seg, target_cls)
+        binary_image_array = self.seg_model.make_binary_label_array(target_cls_pointList, binary_image_array)
+
+        kernel = np.ones((5, 5), np.uint8)
+        img_dilation = cv2.dilate(binary_image_array, kernel, iterations=2)
+        target_cls_dilat_pointList = self.seg_model.getPoints(img_dilation, 255)
+        num_points = len(target_cls_dilat_pointList)
+        close_obj_index_list = []
+
+        for i in range(0, num_points):
+            pixel = target_cls_dilat_pointList[i]
+            y = pixel[0]
+            x = pixel[1]
+
+            label = seg[y, x]
+            if label != target_cls and label != 10:
+                close_obj_index_list.append(label)
+
+        close_obj_index_list = np.unique(close_obj_index_list)
+
+        for comp_idx in close_obj_index_list:
             comp_xy = np.mean(np.argwhere(seg == comp_idx), axis=0)
 
-            if target_cls == 8:
-                threshold_pxl = 23
-            else:
-                threshold_pxl = 23
-
-            if np.linalg.norm(center_xy - comp_xy) < threshold_pxl:
-                attached_list['obj_list'].append(comp_idx)
-                attached_list['points'].append(comp_xy)
+            attached_list['obj_list'].append(comp_idx)
+            attached_list['points'].append(comp_xy)
 
         attached_list['num'] = attached_list['obj_list'].__len__()
 
@@ -273,12 +325,10 @@ class Env:
 
             opposite_theta = np.radians([180]) + theta
 
-            r = 20
-
             for w in range(128):
                 next1 = 0
-                start_x = new_x + (r + w) * np.cos(opposite_theta)
-                start_y = new_y - (r + w) * np.sin(opposite_theta)
+                start_x = new_x + (20 + w) * np.cos(opposite_theta)
+                start_y = new_y - (20 + w) * np.sin(opposite_theta)
 
                 start_xx = np.round(start_x).astype(np.int)
                 start_yy = np.round(start_y).astype(np.int)
@@ -386,7 +436,6 @@ class Env:
                     base_angle = a_angle
 
             # 둘 중 하나가 -1 일 때
-
             if a_angle * b_angle < 0:
                 temp_angle_a = a_angle + target_angle / 2
 
@@ -423,6 +472,11 @@ class Env:
                 new_x = center_xy[1] + 7 * np.cos(theta)
                 new_y = 127 - (center_temp[0] + 7 * np.sin(theta))
 
+                if not (pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1]):
+                    theta += np.radians([180])
+                    new_x = center_xy[1] + 7 * np.cos(theta)
+                    new_y = 127 - (center_temp[0] + 7 * np.sin(theta))
+
                 new_xx = np.round(new_x).astype(np.int)
                 new_yy = np.round(new_y).astype(np.int)
                 end_pt = [new_yy, new_xx]  # int
@@ -431,13 +485,12 @@ class Env:
 
                 # Find starting point
                 opposite_theta = np.radians([180]) + theta
-                r = 20
 
                 for w in range(128):
                     next1 = 0
 
-                    start_x = new_x + (r + w) * np.cos(opposite_theta)
-                    start_y = new_y - (r + w) * np.sin(opposite_theta)
+                    start_x = new_x + (20 + w) * np.cos(opposite_theta)
+                    start_y = new_y - (20 + w) * np.sin(opposite_theta)
 
                     start_xx = np.round(start_x).astype(np.int)
                     start_yy = np.round(start_y).astype(np.int)
@@ -464,16 +517,19 @@ class Env:
                 new_x = center_xy[1] + 10 * np.cos(theta)
                 new_y = 127 - (center_temp[0] + 10 * np.sin(theta))
 
+                if not (pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1]):
+                    theta += np.radians([180])
+                    new_x = center_xy[1] + 7 * np.cos(theta)
+                    new_y = 127 - (center_temp[0] + 7 * np.sin(theta))
+
                 # Find starting point
                 opposite_theta = np.radians([180]) + theta
 
-                r = 20
-
-                for w in range(128):
+                for w in range(128):  # minimum r = 20
                     next1 = 0
 
-                    start_x = new_x + (r + w) * np.cos(opposite_theta)
-                    start_y = new_y - (r + w) * np.sin(opposite_theta)
+                    start_x = new_x + (20 + w) * np.cos(opposite_theta)
+                    start_y = new_y - (20 + w) * np.sin(opposite_theta)
 
                     start_xx = np.round(start_x).astype(np.int)
                     start_yy = np.round(start_y).astype(np.int)
@@ -496,8 +552,6 @@ class Env:
 
         cv2.imshow("Dir complete", color_img)
         cv2.waitKey(1)
-
-        cv2.imwrite("{}.bmp".format(target_cls), color_img)
 
         # starting to end point
         start_xyz = self.global_cam.color2xyz([starting_pt])
@@ -644,7 +698,7 @@ class Env:
         self.gripper_open()
 
         msg = input("Use detacher? (T/F)")
-
+        msg = 'T'
         if msg == 'T':
             self.use_detacher = True
         else:
