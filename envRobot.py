@@ -1,9 +1,6 @@
 """
 Vision based object grasping
-latest Ver.180102
-- Add a method that using dilation to find neighboring object
-- Add a solution for objects out of bounds
-
+latest Ver.170103
 """
 
 # Robot
@@ -116,7 +113,7 @@ class Env:
         self.movej(HOME, self.vel, self.acc)
 
         # msg = input("Use detahcer? (T/F)")
-        msg = True
+        msg = "T"
         self.use_detacher = False
 
         if msg == "T":
@@ -156,7 +153,7 @@ class Env:
         print(">> Target Object : ", OBJ_LIST[target_cls], file=sys.stderr)
 
         if self.use_detacher:
-            [self.detacher(seg_img, target_cls) for _ in range(3)]
+            [self.detacher(target_cls) for _ in range(3)]
 
         seg_img, color_seg_img = self.get_seg()
         # if the target class not exist, pass
@@ -222,47 +219,17 @@ class Env:
         l[2] += 0.057
         self.movel(l, 1, 1)
 
-    def path_gen(self, seg, new_x, new_y, theta):
-        starting_pt = [0, 0]
-        end_pt = [0, 0]
+    def detacher(self, target_cls):
+        seg, color_img = self.get_seg()
 
-        opposite_theta = np.radians([180]) + theta
-
-        r = 20
-
-        for w in range(128):
-            next1 = 0
-
-            start_x = new_x + (r + w) * np.cos(opposite_theta)
-            start_y = new_y - (r + w) * np.sin(opposite_theta)
-
-            start_xx = np.round(start_x).astype(np.int)
-            start_yy = np.round(start_y).astype(np.int)
-
-            for i in [-6, 0, 6]:
-                for k in [-6, 0, 6]:
-                    if seg[start_yy + k, start_xx + i] != 10:
-                        next1 = 1
-
-            if next1 == 0:
-                starting_pt = [int(start_yy), int(start_xx)]
-#                 cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
-                break
-
-        return starting_pt, end_pt
-
-    def detacher(self, seg, target_cls):
-        pxl_boundary_x = [14, 241]
-        pxl_boundary_y = [14, 113]
-
-        color_img = self.seg_model.convert_grey_label_to_color_label(seg)
+        pxl_boundary_x = [12, 243]
+        pxl_boundary_y = [50, 110]
 
         attached_list = {"obj_list": [], "points": []}
 
-        obj_list = np.unique(seg)[:-1]
-        obj_list = np.delete(obj_list, np.argwhere(obj_list == target_cls))
-
         center_xy = np.mean(np.argwhere(seg == target_cls), axis=0)
+        ccx, ccy = np.round(center_xy).astype(np.int)
+
         end_pt = [0., 0.]
         starting_pt = [0., 0.]
 
@@ -272,8 +239,8 @@ class Env:
         target_cls_pointList = self.seg_model.getPoints(seg, target_cls)
         binary_image_array = self.seg_model.make_binary_label_array(target_cls_pointList, binary_image_array)
 
-        kernel = np.ones((5, 5), np.uint8)
-        img_dilation = cv2.dilate(binary_image_array, kernel, iterations=2)
+        kernel = np.ones((3, 3), np.uint8)
+        img_dilation = cv2.dilate(binary_image_array, kernel, iterations=3)
         target_cls_dilat_pointList = self.seg_model.getPoints(img_dilation, 255)
         num_points = len(target_cls_dilat_pointList)
         close_obj_index_list = []
@@ -300,8 +267,6 @@ class Env:
         if attached_list['num'] == 0:
             return
         elif attached_list['num'] == 1:
-            ccx, ccy = np.round(center_xy).astype(np.int)
-
             pt = attached_list['points'][0]
 
             center_temp = np.copy(center_xy)
@@ -317,11 +282,13 @@ class Env:
 
             theta = np.radians(angle)
 
-            new_x = center_xy[1] + 7 * np.cos(theta)
-            new_y = 127 - (center_temp[0] + 10 * np.sin(theta))
+            new_x = center_xy[1] + 3 * np.cos(theta)
+            new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
 
-            new_x = np.round(new_x).astype(np.int)  # goal_position
-            new_y = np.round(new_y).astype(np.int)
+            if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
+                theta += np.radians([180])
+                new_x = center_temp[1] + 3 * np.cos(theta)
+                new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
 
             opposite_theta = np.radians([180]) + theta
 
@@ -333,14 +300,16 @@ class Env:
                 start_xx = np.round(start_x).astype(np.int)
                 start_yy = np.round(start_y).astype(np.int)
 
-                for i in [-6, 0, 6]:
-                    for k in [-6, 0, 6]:
-                        if seg[start_yy + k, start_xx + i] != 10:
-                            next1 = 1
+                for i in [-5, 0, 5]:
+                    for k in [-5, 0, 5]:
+                        try:
+                            if seg[start_yy + k, start_xx + i] != 10:
+                                next1 = 1
+                        except IndexError:
+                            pass
 
                 if next1 == 0:
-                    starting_pt = [int(start_yy), int(start_xx)]
-                    cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
+                    starting_pt = [start_yy, int(start_xx)]
                     break
 
             new_xx = np.round(new_x).astype(np.int)
@@ -349,8 +318,6 @@ class Env:
             end_pt = [new_yy, new_xx]  # int
 
         elif attached_list['num'] > 1:
-            ccx, ccy = np.round(center_xy).astype(np.int)
-
             pt_list = np.arange(0, attached_list['points'].__len__())
             pt_points = attached_list['points']
 
@@ -469,13 +436,13 @@ class Env:
 
                 theta = np.radians(theta)
 
-                new_x = center_xy[1] + 7 * np.cos(theta)
-                new_y = 127 - (center_temp[0] + 7 * np.sin(theta))
+                new_x = center_xy[1] + 3 * np.cos(theta)
+                new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
 
-                if not (pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1]):
+                if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
                     theta += np.radians([180])
-                    new_x = center_xy[1] + 7 * np.cos(theta)
-                    new_y = 127 - (center_temp[0] + 7 * np.sin(theta))
+                    new_x = center_temp[1] + 3 * np.cos(theta)
+                    new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
 
                 new_xx = np.round(new_x).astype(np.int)
                 new_yy = np.round(new_y).astype(np.int)
@@ -495,14 +462,16 @@ class Env:
                     start_xx = np.round(start_x).astype(np.int)
                     start_yy = np.round(start_y).astype(np.int)
 
-                    for i in [-6, 0, 6]:
-                        for k in [-6, 0, 6]:
-                            if seg[start_yy + k, start_xx + i] != 10:
-                                next1 = 1
+                    for i in [-5, 0, 5]:
+                        for k in [-5, 0, 5]:
+                            try:
+                                if seg[start_yy + k, start_xx + i] != 10:
+                                    next1 = 1
+                            except IndexError:
+                                pass
 
                     if next1 == 0:
-                        starting_pt = [int(start_yy), int(start_xx)]
-                        cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
+                        starting_pt = [start_yy, int(start_xx)]
                         break
 
             elif where_pt is "inner":
@@ -514,13 +483,13 @@ class Env:
 
                 theta = np.radians(theta)
 
-                new_x = center_xy[1] + 10 * np.cos(theta)
-                new_y = 127 - (center_temp[0] + 10 * np.sin(theta))
+                new_x = center_xy[1] + 3 * np.cos(theta)
+                new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
 
-                if not (pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1]):
+                if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
                     theta += np.radians([180])
-                    new_x = center_xy[1] + 7 * np.cos(theta)
-                    new_y = 127 - (center_temp[0] + 7 * np.sin(theta))
+                    new_x = center_temp[1] + 3 * np.cos(theta)
+                    new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
 
                 # Find starting point
                 opposite_theta = np.radians([180]) + theta
@@ -534,14 +503,16 @@ class Env:
                     start_xx = np.round(start_x).astype(np.int)
                     start_yy = np.round(start_y).astype(np.int)
 
-                    for i in [-6, 0, 6]:
-                        for k in [-6, 0, 6]:
-                            if seg[start_yy + k, start_xx + i] != 10:
-                                next1 = 1
+                    for i in [-5, 0, 5]:
+                        for k in [-5, 0, 5]:
+                            try:
+                                if seg[start_yy + k, start_xx + i] != 10:
+                                    next1 = 1
+                            except IndexError:
+                                pass
 
                     if next1 == 0:
-                        starting_pt = [int(start_yy), int(start_xx)]
-                        cv2.line(color_img, (ccy, ccx), (start_xx, start_yy), (0, 255, 0))
+                        starting_pt = [start_yy, int(start_xx)]
                         break
 
                 new_xx = np.round(new_x).astype(np.int)
@@ -550,12 +521,23 @@ class Env:
                 end_pt = [new_yy, new_xx]
                 cv2.line(color_img, (ccy, ccx), (new_xx, new_yy), (255, 255, 255))
 
+        if starting_pt[0] < 35:
+            starting_pt[0] = 35
+        elif starting_pt[0] > 115:
+            starting_pt[0] = 110
+
+        cv2.line(color_img, (ccy, ccx), (starting_pt[1], starting_pt[0]), (0, 255, 0))
         cv2.imshow("Dir complete", color_img)
         cv2.waitKey(1)
 
         # starting to end point
+        self.movej(HOME, self.acc, self.vel)
+
         start_xyz = self.global_cam.color2xyz([starting_pt])
         goal_xyz = self.global_cam.color2xyz([end_pt])  # patched image's averaging pose [x, y, z]
+
+        if not ((self.x_boundary[0] < start_xyz[0] < self.x_boundary[1]) and (self.y_boundary[0] < start_xyz[1] < self.y_boundary[1])):
+            return
 
         # y축 보정
         goal_xyz[1] -= 0.015
