@@ -1,6 +1,7 @@
 """
-Vision based object grasping
-latest Ver.170103
+Vision based object grasping #
+알고리즘 수정 전 백업용
+latest Ver.180111
 """
 
 # Robot
@@ -22,7 +23,7 @@ starting_pose = [ 1.2985, -1.7579,  1.6851, -1.5005, -1.5715, -0.2758]
 
 shf_pt = [[-1.5937, -1.3493, 1.6653, -1.8875, -1.5697, -1.5954],
           [-1.5839, -1.2321, 1.8032, - 2.1425, - 1.5727, -1.5859],
-          [-1.567 , -1.4621, 1.8072 ,- 2.0248, - 1.6009, -1.5858],
+          [-1.567 , -1.4621, 1.8072, - 2.0248, - 1.6009, -1.5858],
           [-1.5522, -2.055,  1.8372, - 1.8303, - 1.6125, -1.5792]]
 j_pt = [[ 3.2842, -1.389,   1.7775, -1.9584, -1.5712,  0.1392],
         [-0.6439, -1.6851,  2.0874, -1.9749, -1.5725, -0.6631],
@@ -70,6 +71,7 @@ class Env:
         # Segmentation Model
         self.seg_model = None
         self.obj_angle = 0
+        self.steps = 0
 
         # Robot
         self.acc = 5
@@ -114,15 +116,13 @@ class Env:
 
         # msg = input("Use detahcer? (T/F)")
         msg = "T"
-        self.use_detacher = False
-
         if msg == "T":
             self.use_detacher = True
         else:
             self.use_detacher = False
 
         self.x_boundary = [-0.297, 0.3034]
-        self.y_boundary = [-0.427, -0.226]
+        self.y_boundary = [-0.444, -0.226]  # 427 432
 
         print("Robot Environment Ready.", file=sys.stderr)
 
@@ -140,7 +140,8 @@ class Env:
     def set_segmentation_model(self, segmentation_model):
         self.seg_model = segmentation_model
 
-    def reset(self, target_cls):
+    def reset(self, target_cls, n):
+        self.steps = n
         self.movej(HOME, self.acc, self.vel)
         self.approaching(target_cls)             # robot move
 
@@ -148,12 +149,13 @@ class Env:
         seg_img, color_seg_img = self.get_seg()
 
         cv2.imshow("color_seg_img", color_seg_img)
+        cv2.imwrite("data\\{}_{}.png".format(self.steps, target_cls), color_seg_img)
         cv2.waitKey(10)
 
         print(">> Target Object : ", OBJ_LIST[target_cls], file=sys.stderr)
 
         if self.use_detacher:
-            [self.detacher(target_cls) for _ in range(3)]
+            [self.detacher(target_cls, i) for i in range(2)]
 
         seg_img, color_seg_img = self.get_seg()
         # if the target class not exist, pass
@@ -171,7 +173,7 @@ class Env:
             if self.obj_pos is None:
                 return
 
-            # Safe zone
+            # Safe zone        self.y_boundary = [-0.427, -0.226]
             if (self.x_boundary[0]< self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
                 self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
 
@@ -219,7 +221,7 @@ class Env:
         l[2] += 0.057
         self.movel(l, 1, 1)
 
-    def detacher(self, target_cls):
+    def detacher(self, target_cls, i):
         seg, color_img = self.get_seg()
 
         pxl_boundary_x = [12, 243]
@@ -233,13 +235,14 @@ class Env:
         end_pt = [0., 0.]
         starting_pt = [0., 0.]
 
-        shape = (128, 256)
-        binary_image_array = np.zeros(shape=shape, dtype=np.uint8)
-        binary_image_array.fill(0)
+        chk_range = [-4, 0, 4]
+
+        binary_image_array = np.zeros(shape=(128, 256), dtype=np.uint8)
+
         target_cls_pointList = self.seg_model.getPoints(seg, target_cls)
         binary_image_array = self.seg_model.make_binary_label_array(target_cls_pointList, binary_image_array)
 
-        kernel = np.ones((3, 3), np.uint8)
+        kernel = np.ones((5, 5), np.uint8)
         img_dilation = cv2.dilate(binary_image_array, kernel, iterations=3)
         target_cls_dilat_pointList = self.seg_model.getPoints(img_dilation, 255)
         num_points = len(target_cls_dilat_pointList)
@@ -263,6 +266,7 @@ class Env:
             attached_list['points'].append(comp_xy)
 
         attached_list['num'] = attached_list['obj_list'].__len__()
+        print("Neighboring Objects Num. : ", attached_list['num'])
 
         if attached_list['num'] == 0:
             return
@@ -276,46 +280,58 @@ class Env:
 
             angle = np.degrees(np.arctan2(pt[0] - center_temp[0], pt[1] - center_temp[1]))
 
-            angle = angle + 90
-            if angle > 180:
-                angle = angle + -360
+            if (0 <= angle < 90) or (-90 <= angle < -180):
+                # 상단
+                if pt[0] < 91 :
+                    angle = angle - 90
+                    if angle < - 180:
+                        angle = angle + 360
+                else:  #하단
+                    angle = angle + 90
+                    if angle > 180:
+                        angle = angle - 360
+            elif (-90 <= angle < 0) or (90 <= angle < 180):
+                if pt[0] < 91:
+                    angle = angle + 90
+                    if angle > 180:
+                        angle = angle - 360
+                else:
+                    angle = angle - 90
+                    if angle < - 180:
+                        angle = angle + 360
 
             theta = np.radians(angle)
 
-            new_x = center_xy[1] + 3 * np.cos(theta)
-            new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
+            end_x = pt[1] + 5 * np.cos(theta)
+            end_y = 127 - (pt[0] + 5 * np.sin(theta))
 
-            if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
-                theta += np.radians([180])
-                new_x = center_temp[1] + 3 * np.cos(theta)
-                new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
+            # if not ((pxl_boundary_x[0] <= end_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= end_y < pxl_boundary_y[1])):
+            #     theta += np.radians([180])
+            #     end_x = pt[1] + 5 * np.cos(theta)
+            #     end_y = 127 - (pt[0] + 5 * np.sin(theta))
 
             opposite_theta = np.radians([180]) + theta
 
             for w in range(128):
                 next1 = 0
-                start_x = new_x + (20 + w) * np.cos(opposite_theta)
-                start_y = new_y - (20 + w) * np.sin(opposite_theta)
+                start_x = end_x + (20 + w) * np.cos(opposite_theta)
+                start_y = end_y - (20 + w) * np.sin(opposite_theta)
 
-                start_xx = np.round(start_x).astype(np.int)
-                start_yy = np.round(start_y).astype(np.int)
+                s = np.round([start_y, start_x]).squeeze(1).astype(np.uint32)
 
-                for i in [-5, 0, 5]:
-                    for k in [-5, 0, 5]:
+                for i in chk_range:
+                    for k in chk_range:
                         try:
-                            if seg[start_yy + k, start_xx + i] != 10:
+                            if seg[s[0] + k, s[1] + i] != 10:
                                 next1 = 1
                         except IndexError:
                             pass
 
                 if next1 == 0:
-                    starting_pt = [start_yy, int(start_xx)]
+                    starting_pt = s
                     break
 
-            new_xx = np.round(new_x).astype(np.int)
-            new_yy = np.round(new_y).astype(np.int)
-
-            end_pt = [new_yy, new_xx]  # int
+            end_pt = np.array([end_y, end_x]).astype(np.int32)
 
         elif attached_list['num'] > 1:
             pt_list = np.arange(0, attached_list['points'].__len__())
@@ -349,7 +365,7 @@ class Env:
             for t_ang in subset_angle:
                 if attached_list['num'] == 2:
                     where_pt = 'outer'
-                    target_angle = t_ang
+                    target_angle = abs(t_ang)
                     break
 
                 else:
@@ -403,16 +419,16 @@ class Env:
                     base_angle = a_angle
 
             # 둘 중 하나가 -1 일 때
-            if a_angle * b_angle < 0:
+            elif a_angle * b_angle < 0:
                 temp_angle_a = a_angle + target_angle / 2
 
                 if temp_angle_a > 180:
-                    temp_angle_a = -360 + temp_angle_a
+                    temp_angle_a = temp_angle_a - 360
 
                 temp_angle_b = b_angle - target_angle / 2
 
-                if temp_angle_b > 180:
-                    temp_angle_b = -360 + temp_angle_b
+                if temp_angle_b < -180:
+                    temp_angle_b = temp_angle_b + 360
 
                 if -1 < temp_angle_a - temp_angle_b < 1:
                     base_angle = a_angle
@@ -420,7 +436,7 @@ class Env:
                     base_angle = b_angle
 
             # 둘다 - 일때 더 작은놈이 기준.
-            if (a_angle < 0) and (b_angle < 0):
+            elif (a_angle < 0) and (b_angle < 0):
                 if a_angle > b_angle:
                     base_angle = b_angle
                 else:
@@ -432,17 +448,19 @@ class Env:
                 theta = base_angle - target_angle
 
                 if theta < -180:
-                    theta = 360 + theta
+                    theta = theta + 360
+                if theta > 180:
+                    theta = theta - 360
 
                 theta = np.radians(theta)
 
-                new_x = center_xy[1] + 3 * np.cos(theta)
-                new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
+                new_x = center_xy[1] + 5 * np.cos(theta)
+                new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
 
                 if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
                     theta += np.radians([180])
-                    new_x = center_temp[1] + 3 * np.cos(theta)
-                    new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
+                    new_x = center_temp[1] + 5 * np.cos(theta)
+                    new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
 
                 new_xx = np.round(new_x).astype(np.int)
                 new_yy = np.round(new_y).astype(np.int)
@@ -462,8 +480,8 @@ class Env:
                     start_xx = np.round(start_x).astype(np.int)
                     start_yy = np.round(start_y).astype(np.int)
 
-                    for i in [-5, 0, 5]:
-                        for k in [-5, 0, 5]:
+                    for i in chk_range:
+                        for k in chk_range:
                             try:
                                 if seg[start_yy + k, start_xx + i] != 10:
                                     next1 = 1
@@ -483,13 +501,13 @@ class Env:
 
                 theta = np.radians(theta)
 
-                new_x = center_xy[1] + 3 * np.cos(theta)
-                new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
+                new_x = center_xy[1] + 5 * np.cos(theta)
+                new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
 
                 if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
                     theta += np.radians([180])
-                    new_x = center_temp[1] + 3 * np.cos(theta)
-                    new_y = 127 - (center_temp[0] + 3 * np.sin(theta))
+                    new_x = center_temp[1] + 5 * np.cos(theta)
+                    new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
 
                 # Find starting point
                 opposite_theta = np.radians([180]) + theta
@@ -512,7 +530,7 @@ class Env:
                                 pass
 
                     if next1 == 0:
-                        starting_pt = [start_yy, int(start_xx)]
+                        starting_pt = [int(start_yy), int(start_xx)]
                         break
 
                 new_xx = np.round(new_x).astype(np.int)
@@ -523,29 +541,27 @@ class Env:
 
         if starting_pt[0] < 35:
             starting_pt[0] = 35
-        elif starting_pt[0] > 115:
-            starting_pt[0] = 110
+        elif starting_pt[0] > 107:
+            starting_pt[0] = 106
 
-        cv2.line(color_img, (ccy, ccx), (starting_pt[1], starting_pt[0]), (0, 255, 0))
+        if seg[starting_pt[0], starting_pt[1]] != 10:
+            return
+
+        cv2.line(color_img, (end_pt[1], end_pt[0]), (starting_pt[1], starting_pt[0]), (0, 255, 0))
         cv2.imshow("Dir complete", color_img)
         cv2.waitKey(1)
 
         # starting to end point
-        self.movej(HOME, self.acc, self.vel)
-
         start_xyz = self.global_cam.color2xyz([starting_pt])
         goal_xyz = self.global_cam.color2xyz([end_pt])  # patched image's averaging pose [x, y, z]
-
-        if not ((self.x_boundary[0] < start_xyz[0] < self.x_boundary[1]) and (self.y_boundary[0] < start_xyz[1] < self.y_boundary[1])):
-            return
 
         # y축 보정
         goal_xyz[1] -= 0.015
         start_xyz[1] -= 0.015
 
         # z-Axis
-        goal_xyz[2] = -0.053
-        start_xyz[2] = -0.053
+        goal_xyz[2] = -0.0555
+        start_xyz[2] = -0.0555
 
         self.gripper_close(255)
         self.movej(starting_pose, self.acc, self.vel)
@@ -554,9 +570,9 @@ class Env:
         move_end_pt = np.append(goal_xyz, [0, -3.14, 0])  # Initial point  Added z-dummy 0.05
 
         self.movel(move_start_pt + np.array([0, 0, 0.15, 0, 0, 0]), 2, 2)
-        self.movel(move_start_pt, 2, 2)
+        self.movel(move_start_pt, 1, 1)
 
-        self.movel(move_end_pt, 1, 1)
+        self.movel(move_end_pt, 0.6, 0.6)
         self.movel(move_end_pt + np.array([0, 0, 0.15, 0, 0, 0]), 2, 2)
         self.movej(HOME, self.acc, self.vel)
         self.gripper_open(255)
@@ -679,14 +695,12 @@ class Env:
         self.movej(HOME, a, v)
         self.gripper_open()
 
-        msg = input("Use detacher? (T/F)")
+        # msg = input("Use detacher? (T/F)")
         msg = 'T'
         if msg == 'T':
             self.use_detacher = True
         else:
             self.use_detacher = False
-
-
 
     def get_seg(self):
         img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
