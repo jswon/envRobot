@@ -1,7 +1,8 @@
 """
-Vision based object grasping #
-알고리즘 수정 전 백업용
-latest Ver.180111
+Vision based object grasping
+latest Ver.180112
+- SVM ver.0.1
+
 """
 
 # Robot
@@ -12,7 +13,8 @@ import pyGrip
 # utils
 import cv2
 import serial
-import itertools
+from sklearn import svm
+from matplotlib import pyplot as plt
 
 from util import *
 
@@ -122,7 +124,7 @@ class Env:
             self.use_detacher = False
 
         self.x_boundary = [-0.297, 0.3034]
-        self.y_boundary = [-0.444, -0.226]  # 427 432
+        self.y_boundary = [-0.457, -0.226]  # 427 432s
 
         print("Robot Environment Ready.", file=sys.stderr)
 
@@ -154,7 +156,13 @@ class Env:
 
         print(">> Target Object : ", OBJ_LIST[target_cls], file=sys.stderr)
 
-        if self.use_detacher:
+        if target_cls in (np.unique(seg_img)):
+            self.obj_pos, _ = self.get_obj_pos(target_cls)
+        else :
+            self.obj_pos = None
+            return
+
+        if self.use_detacher and (self.x_boundary[0]< self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
             [self.detacher(target_cls, i) for i in range(2)]
 
         seg_img, color_seg_img = self.get_seg()
@@ -222,337 +230,228 @@ class Env:
         self.movel(l, 1, 1)
 
     def detacher(self, target_cls, i):
-        seg, color_img = self.get_seg()
+        seg_img, color_img = self.get_seg()
+        cv2.imwrite("data\\neigoboring_{}_{}.png".format(self.steps, i), color_img)
+        seg_img = np.array(seg_img)
 
-        pxl_boundary_x = [12, 243]
-        pxl_boundary_y = [50, 110]
+        end_pt = [0, 0]
+        start_pt = [0, 0]
 
-        attached_list = {"obj_list": [], "points": []}
+        sorted_neighboring_obj = self.seg_model.find_neighboring_obj(seg_img, target_cls)
 
-        center_xy = np.mean(np.argwhere(seg == target_cls), axis=0)
-        ccx, ccy = np.round(center_xy).astype(np.int)
-
-        end_pt = [0., 0.]
-        starting_pt = [0., 0.]
-
-        chk_range = [-4, 0, 4]
-
-        binary_image_array = np.zeros(shape=(128, 256), dtype=np.uint8)
-
-        target_cls_pointList = self.seg_model.getPoints(seg, target_cls)
-        binary_image_array = self.seg_model.make_binary_label_array(target_cls_pointList, binary_image_array)
-
-        kernel = np.ones((5, 5), np.uint8)
-        img_dilation = cv2.dilate(binary_image_array, kernel, iterations=3)
-        target_cls_dilat_pointList = self.seg_model.getPoints(img_dilation, 255)
-        num_points = len(target_cls_dilat_pointList)
-        close_obj_index_list = []
-
-        for i in range(0, num_points):
-            pixel = target_cls_dilat_pointList[i]
-            y = pixel[0]
-            x = pixel[1]
-
-            label = seg[y, x]
-            if label != target_cls and label != 10:
-                close_obj_index_list.append(label)
-
-        close_obj_index_list = np.unique(close_obj_index_list)
-
-        for comp_idx in close_obj_index_list:
-            comp_xy = np.mean(np.argwhere(seg == comp_idx), axis=0)
-
-            attached_list['obj_list'].append(comp_idx)
-            attached_list['points'].append(comp_xy)
-
-        attached_list['num'] = attached_list['obj_list'].__len__()
-        print("Neighboring Objects Num. : ", attached_list['num'])
-
-        if attached_list['num'] == 0:
+        if len(sorted_neighboring_obj) == 0:
             return
-        elif attached_list['num'] == 1:
-            pt = attached_list['points'][0]
 
-            center_temp = np.copy(center_xy)
+        # fig = plt.figure()
+        # plt.ylim(0, 128)
+        # plt.xlim(0, 256)
 
-            pt[0] = 127 - pt[0]
-            center_temp[0] = 127 - center_temp[0]
+        center_x = 0.
+        center_y = 0.
 
-            angle = np.degrees(np.arctan2(pt[0] - center_temp[0], pt[1] - center_temp[1]))
+        for n_obj in [sorted_neighboring_obj[0]]:
+            # Linear classification
+            seg_img[0] = 127 - seg_img[0]
+            target_pt = np.argwhere(seg_img == target_cls).astype("float64")
+            compare_pt = np.argwhere(seg_img == n_obj).astype("float64")
+            center_x = np.mean(np.concatenate((target_pt, compare_pt)), axis=0)[1]
+            center_y = np.mean(np.concatenate((target_pt, compare_pt)), axis=0)[0]
 
-            if (0 <= angle < 90) or (-90 <= angle < -180):
-                # 상단
-                if pt[0] < 91 :
-                    angle = angle - 90
-                    if angle < - 180:
-                        angle = angle + 360
-                else:  #하단
-                    angle = angle + 90
-                    if angle > 180:
-                        angle = angle - 360
-            elif (-90 <= angle < 0) or (90 <= angle < 180):
-                if pt[0] < 91:
-                    angle = angle + 90
-                    if angle > 180:
-                        angle = angle - 360
+            target_label = [0] * target_pt.shape[0]
+            compare_label = [1] * compare_pt.shape[0]
+
+            data = np.concatenate((target_pt, compare_pt))
+            temp = np.array([data[:, 1], data[:, 0]]).transpose()
+            label = np.concatenate((target_label, compare_label))
+
+            # a = target_pt.transpose()
+            # b = compare_pt.transpose()
+
+            # plt.scatter(a[1], a[0], c='yellow', marker=',')
+            # plt.scatter(b[1], b[0], c='green', marker=',')
+            # plt.scatter(center_x, center_y, c='purple', marker='x')
+
+            clf = svm.SVC(kernel='linear', gamma=0.7, C=1)
+            clf.fit(temp, label)
+
+            w = clf.coef_[0]
+            w_temp = np.copy(w[1])
+
+            othogonal = 0
+
+            if -10e-3 < w_temp < 10e-3:                                      # 수직으로 그래프가 나오면 계산이 안됨.
+                xxx = [center_x] * 128
+                yyy = list(range(0, 128))
+                othogonal = 1
+            else:                                                             # 수직 아닐때. 계산은 됨.
+                g = -w[0] / w_temp                                           # Decision Boundary 의 기울기.
+
+                xx = np.arange(0, 256)
+                yy = g * xx - (clf.intercept_[0]) / w[1]
+                true_range = np.where(np.logical_and(yy < 128, yy > 0))
+
+                if g > 0:
+                    min_idx = true_range[0][0]
+                    max_idx = true_range[0][-1]
                 else:
-                    angle = angle - 90
-                    if angle < - 180:
-                        angle = angle + 360
+                    min_idx = true_range[0][-1]
+                    max_idx = true_range[0][0]
 
-            theta = np.radians(angle)
+                xxx = np.linspace(xx[min_idx], xx[max_idx])
+                yyy = g * xxx - (clf.intercept_[0]) / w[1]
 
-            end_x = pt[1] + 5 * np.cos(theta)
-            end_y = 127 - (pt[0] + 5 * np.sin(theta))
+            # plt.scatter(xx[min_idx], yy[min_idx], marker='o')
+            # plt.scatter(xx[max_idx], yy[max_idx], marker='o')
 
-            # if not ((pxl_boundary_x[0] <= end_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= end_y < pxl_boundary_y[1])):
-            #     theta += np.radians([180])
-            #     end_x = pt[1] + 5 * np.cos(theta)
-            #     end_y = 127 - (pt[0] + 5 * np.sin(theta))
+            distance = np.inf
+            new_center_x = 0
+            new_center_y = 0
 
-            opposite_theta = np.radians([180]) + theta
+            for x_1, y_1 in zip(xxx, yyy):
+                temp_dist = np.linalg.norm([x_1 - center_x, y_1 - center_y])
 
-            for w in range(128):
-                next1 = 0
-                start_x = end_x + (20 + w) * np.cos(opposite_theta)
-                start_y = end_y - (20 + w) * np.sin(opposite_theta)
+                if temp_dist < distance:
+                    distance = temp_dist
+                    new_center_x = x_1
+                    new_center_y = y_1
 
-                s = np.round([start_y, start_x]).squeeze(1).astype(np.uint32)
+            # plt.scatter(new_center_x, new_center_y, marker='o', c='purple')
 
-                for i in chk_range:
-                    for k in chk_range:
-                        try:
-                            if seg[s[0] + k, s[1] + i] != 10:
-                                next1 = 1
-                        except IndexError:
-                            pass
+            # 수직일 때.
+            y_st = y_et = x_et = x_st = 0.
+            if othogonal == 1:
+                x_st = x_et = int(round(new_center_x))
 
-                if next1 == 0:
-                    starting_pt = s
-                    break
+                y_under_range = list(reversed(np.linspace(0, new_center_y)))
+                y_upper_range = np.linspace(new_center_y, 127)
 
-            end_pt = np.array([end_y, end_x]).astype(np.int32)
+                for y_st in y_under_range:
+                    m = 0
 
-        elif attached_list['num'] > 1:
-            pt_list = np.arange(0, attached_list['points'].__len__())
-            pt_points = attached_list['points']
+                    for i in range(-3, 4):
+                        for j in range(-3, 4):
+                            y1 = int(round(j + y_st))
 
-            subset = list(itertools.combinations(pt_list, 2))
-            init_array = []
-            subset_angle = np.array(init_array)
-
-            for pt_1, pt_2 in subset:
-                temp_img = np.copy(color_img)
-
-                xy1 = pt_points[pt_1]
-                xy2 = pt_points[pt_2]
-
-                xy11 = np.round(xy1).astype(np.int)
-                xy22 = np.round(xy2).astype(np.int)
-
-                cv2.line(temp_img, (ccy, ccx), (xy11[1], xy11[0]), (255, 255, 255))
-                cv2.line(temp_img, (ccy, ccx), (xy22[1], xy22[0]), (255, 255, 255))
-
-                th1 = np.arctan2((xy2[0] - center_xy[0]), (xy2[1] - center_xy[1]))
-                th2 = np.arctan2((xy1[0] - center_xy[0]), (xy1[1] - center_xy[1]))
-
-                dtheta = np.abs(th1 - th2)
-                theta = np.min([dtheta, 6.28 - dtheta])
-                subset_angle = np.append(subset_angle, np.degrees(theta))
-
-            where_pt = 'none'  # 'inner' or 'outer'
-
-            for t_ang in subset_angle:
-                if attached_list['num'] == 2:
-                    where_pt = 'outer'
-                    target_angle = abs(t_ang)
-                    break
-
-                else:
-                    temp = np.copy(subset_angle)
-                    temp = np.delete(subset_angle, np.argwhere(temp == t_ang))
-
-                    for case in np.array(list(itertools.combinations(temp, attached_list['num'] - 1))):
-                        sum_others = np.round(np.sum(case))
-                        sum_all = t_ang + sum_others
-
-                        if 359 <= np.round(sum_all) < 361:
-                            where_pt = 'inner'
-                            target_angle = np.max(subset_angle)
-                            break
-
-                        else:
-                            if sum_others - 1 <= t_ang < sum_others + 1:
-                                where_pt = 'outer'
-                                target_angle = t_ang
-                                break
-
-                            elif sum_others - 1 <= 360 - t_ang < sum_others + 1:
-                                where_pt = 'inner'
-                                target_angle = t_ang
-                                break
-
-                if where_pt is not 'none':
-                    break
-
-            comb_idx = np.where(subset_angle == target_angle)[0]
-            pair = subset[comb_idx[0]]
-
-            a_pt = pt_points[pair[0]]
-            b_pt = pt_points[pair[1]]
-
-            a_pt[0] = 127 - a_pt[0]
-            b_pt[0] = 127 - b_pt[0]
-
-            center_temp = np.copy(center_xy)
-            center_temp[0] = 127 - center_temp[0]
-
-            a_angle = np.degrees(np.arctan2(a_pt[0] - center_temp[0], a_pt[1] - center_temp[1]))
-            b_angle = np.degrees(np.arctan2(b_pt[0] - center_temp[0], b_pt[1] - center_temp[1]))
-            base_angle = 0
-
-            # 작은놈이 기준.
-            if (a_angle > 0) and (b_angle > 0):
-                if a_angle > b_angle:
-                    base_angle = b_angle
-                else:
-                    base_angle = a_angle
-
-            # 둘 중 하나가 -1 일 때
-            elif a_angle * b_angle < 0:
-                temp_angle_a = a_angle + target_angle / 2
-
-                if temp_angle_a > 180:
-                    temp_angle_a = temp_angle_a - 360
-
-                temp_angle_b = b_angle - target_angle / 2
-
-                if temp_angle_b < -180:
-                    temp_angle_b = temp_angle_b + 360
-
-                if -1 < temp_angle_a - temp_angle_b < 1:
-                    base_angle = a_angle
-                else:
-                    base_angle = b_angle
-
-            # 둘다 - 일때 더 작은놈이 기준.
-            elif (a_angle < 0) and (b_angle < 0):
-                if a_angle > b_angle:
-                    base_angle = b_angle
-                else:
-                    base_angle = a_angle
-
-            if where_pt is "outer":
-                target_angle = (360 - target_angle) / 2
-
-                theta = base_angle - target_angle
-
-                if theta < -180:
-                    theta = theta + 360
-                if theta > 180:
-                    theta = theta - 360
-
-                theta = np.radians(theta)
-
-                new_x = center_xy[1] + 5 * np.cos(theta)
-                new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
-
-                if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
-                    theta += np.radians([180])
-                    new_x = center_temp[1] + 5 * np.cos(theta)
-                    new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
-
-                new_xx = np.round(new_x).astype(np.int)
-                new_yy = np.round(new_y).astype(np.int)
-                end_pt = [new_yy, new_xx]  # int
-
-                cv2.line(color_img, (ccy, ccx), (new_xx, new_yy), (255, 255, 255))
-
-                # Find starting point
-                opposite_theta = np.radians([180]) + theta
-
-                for w in range(128):
-                    next1 = 0
-
-                    start_x = new_x + (20 + w) * np.cos(opposite_theta)
-                    start_y = new_y - (20 + w) * np.sin(opposite_theta)
-
-                    start_xx = np.round(start_x).astype(np.int)
-                    start_yy = np.round(start_y).astype(np.int)
-
-                    for i in chk_range:
-                        for k in chk_range:
                             try:
-                                if seg[start_yy + k, start_xx + i] != 10:
-                                    next1 = 1
+                                abc = seg_img[y1, x_st]
+                                if abc != 10:
+                                    m += 1
                             except IndexError:
                                 pass
 
-                    if next1 == 0:
-                        starting_pt = [start_yy, int(start_xx)]
+                    if m == 0:
+                        y_st = int(round(y_st))
+                        # plt.scatter(x_st, y_st, marker='x', c='red')
+                        start_pt = [y_st, x_st]
                         break
 
-            elif where_pt is "inner":
-                target_angle = target_angle / 2
-                theta = base_angle + target_angle
-
-                if theta > 90:
-                    theta = -360 + theta
-
-                theta = np.radians(theta)
-
-                new_x = center_xy[1] + 5 * np.cos(theta)
-                new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
-
-                if not ((pxl_boundary_x[0] <= new_x < pxl_boundary_x[1]) and (pxl_boundary_y[0] <= new_y < pxl_boundary_y[1])):
-                    theta += np.radians([180])
-                    new_x = center_temp[1] + 5 * np.cos(theta)
-                    new_y = 127 - (center_temp[0] + 5 * np.sin(theta))
-
-                # Find starting point
-                opposite_theta = np.radians([180]) + theta
-
-                for w in range(128):  # minimum r = 20
-                    next1 = 0
-
-                    start_x = new_x + (20 + w) * np.cos(opposite_theta)
-                    start_y = new_y - (20 + w) * np.sin(opposite_theta)
-
-                    start_xx = np.round(start_x).astype(np.int)
-                    start_yy = np.round(start_y).astype(np.int)
-
-                    for i in [-5, 0, 5]:
-                        for k in [-5, 0, 5]:
+                for y_et in y_upper_range:
+                    m = 0
+                    for i in range(-3, 4):
+                        for j in range(-3, 4):
+                            y_et_1 = int(round(j + y_et))
                             try:
-                                if seg[start_yy + k, start_xx + i] != 10:
-                                    next1 = 1
+                                abc = seg_img[y_et_1, x_et]
+                                if abc != 10:
+                                    m += 1
                             except IndexError:
                                 pass
 
-                    if next1 == 0:
-                        starting_pt = [int(start_yy), int(start_xx)]
+                    if m == 0:
+                        y_et = int(round(y_et))
+                        # plt.scatter(x_et, y_et, marker='x', c='blue')
+                        end_pt = [y_et, x_et]
                         break
 
-                new_xx = np.round(new_x).astype(np.int)
-                new_yy = np.round(new_y).astype(np.int)
+            # 수직이 아닐 떄
+            else:
+                if g > 0:
+                    x_under_range = list(reversed(np.linspace(xx[min_idx], new_center_x)))
+                    x_upper_range = np.linspace(new_center_x, xx[max_idx])
+                else:
+                    x_under_range = np.linspace(new_center_x, xx[min_idx])
+                    x_upper_range = list(reversed(np.linspace(xx[max_idx], new_center_x)))
 
-                end_pt = [new_yy, new_xx]
-                cv2.line(color_img, (ccy, ccx), (new_xx, new_yy), (255, 255, 255))
+                for x_st in x_under_range:
+                    y_st = g * x_st - (clf.intercept_[0]) / w[1]
+                    m = 0
 
-        if starting_pt[0] < 35:
-            starting_pt[0] = 35
-        elif starting_pt[0] > 107:
-            starting_pt[0] = 106
+                    for i in range(-3, 4):
+                        for j in range(-3, 4):
+                            x1 = int(round(i + x_st))
+                            y1 = int(round(j + y_st))
 
-        if seg[starting_pt[0], starting_pt[1]] != 10:
+                            try:
+                                abc = seg_img[y1, x1]
+                                if abc != 10:
+                                    m += 1
+                            except IndexError:
+                                pass
+
+                    if m == 0:
+                        x_st = int(round(x_st))
+                        y_st = int(round(y_st))
+                        # plt.scatter(x_st, y_st, marker='x', c='red')
+                        start_pt = [y_st, x_st]
+                        break
+
+                for x_et in x_upper_range:
+                    y_et = g * x_et - (clf.intercept_[0]) / w[1]
+                    m = 0
+                    for i in range(-3, 4):
+                        for j in range(-3, 4):
+                            x_et_1 = int(round(i + x_et))
+                            y_et_1 = int(round(j + y_et))
+                            try:
+                                abc = seg_img[y_et_1, x_et_1]
+                                if abc != 10:
+                                    m += 1
+                            except IndexError:
+                                pass
+
+                    if m == 0:
+                        x_et = int(round(x_et))
+                        y_et = int(round(y_et))
+                        # plt.scatter(x_et, y_et, marker='x', c='blue')
+                        end_pt = [y_et, x_et]
+                        break
+
+
+        ################
+
+        if center_y > 96:
+            end_pt, start_pt = start_pt, end_pt
+
+        cv2.line(color_img, (end_pt[1], end_pt[0]), (start_pt[1], start_pt[0]), (0, 255, 0))
+        cv2.imwrite("data\\Dir_{}_{}_{}.png".format(self.steps, target_cls, i), color_img)
+
+        if start_pt[0] < 35:
+            start_pt[0] = 35
+        elif start_pt[0] > 107:
+            start_pt[0] = 106
+        if end_pt[0] < 35:
+            end_pt[0] = 35
+        elif end_pt[0] > 107:
+            end_pt[0] = 106
+
+        if start_pt[1] < 12:
+            start_pt[1] = 12
+        elif start_pt[1] > 243:
+            start_pt[1] = 243
+        if end_pt[1] < 12:
+            end_pt[1] = 12
+        elif end_pt[1] > 243:
+            end_pt[1] = 243
+
+        if seg_img[start_pt[0], start_pt[1]] != 10:
             return
 
-        cv2.line(color_img, (end_pt[1], end_pt[0]), (starting_pt[1], starting_pt[0]), (0, 255, 0))
         cv2.imshow("Dir complete", color_img)
         cv2.waitKey(1)
 
+
         # starting to end point
-        start_xyz = self.global_cam.color2xyz([starting_pt])
+        start_xyz = self.global_cam.color2xyz([start_pt])
         goal_xyz = self.global_cam.color2xyz([end_pt])  # patched image's averaging pose [x, y, z]
 
         # y축 보정
@@ -710,6 +609,7 @@ class Env:
         return self.seg_model.run(padded_img)
 
     def get_obj_pos(self, target_cls):  # TODO : class 0~8 repeat version
+        _, _ = self.get_seg()
         pxl_list, eigen_value = self.seg_model.getData(target_cls)  # Get pixel list
         xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
 
