@@ -1,8 +1,6 @@
 """
 Vision based object grasping
-latest Ver.180112
-- SVM ver.0.1
-
+latest Ver.180124
 """
 
 # Robot
@@ -40,7 +38,7 @@ j_pt = [[ 3.2842, -1.389,   1.7775, -1.9584, -1.5712,  0.1392],
 OBJ_LIST = ['O_00_Black_Tape', 'O_01_Glue', 'O_02_Big_USB', 'O_03_Glue_Stick', 'O_04_Big_Box',
             'O_05_Red_Cup', 'O_06_Small_Box', 'O_07_White_Tape', 'O_08_Small_USB',  'O_09_Yellow_Cup']
 
-bkg_padding_img = cv2.imread('new_background\\1.bmp')[:31, :, :]
+bkg_padding_img = cv2.imread('new_background\\bkg_img.png')[:36, :, :]
 # -------------------------------------------------------------------------------
 
 
@@ -117,14 +115,14 @@ class Env:
         self.movej(HOME, self.vel, self.acc)
 
         # msg = input("Use detahcer? (T/F)")
-        msg = "T"
+        msg = "F"
         if msg == "T":
             self.use_detacher = True
         else:
             self.use_detacher = False
 
         self.x_boundary = [-0.297, 0.3034]
-        self.y_boundary = [-0.457, -0.226]  # 427 432s
+        self.y_boundary = [-0.447, -0.226]  # 427 432s 447
 
         print("Robot Environment Ready.", file=sys.stderr)
 
@@ -150,22 +148,30 @@ class Env:
     def approaching(self, target_cls):
         seg_img, color_seg_img = self.get_seg()
 
-        cv2.imshow("color_seg_img", color_seg_img)
-        cv2.imwrite("data\\{}_{}.png".format(self.steps, target_cls), color_seg_img)
-        cv2.waitKey(10)
+        cv2.imshow("Current", color_seg_img)
+        cv2.waitKey(1)
 
         print(">> Target Object : ", OBJ_LIST[target_cls], file=sys.stderr)
 
         if target_cls in (np.unique(seg_img)):
             self.obj_pos, _ = self.get_obj_pos(target_cls)
-        else :
+        else:
             self.obj_pos = None
             return
 
         if self.use_detacher and (self.x_boundary[0]< self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
-            [self.detacher(target_cls, i) for i in range(2)]
+            for i in range(2):
+                _, color_seg_img = self.get_seg()
+                cv2.imshow("Current", color_seg_img)
+                cv2.imshow("Dir", color_seg_img)
+                cv2.waitKey(1)
+                self.detacher(target_cls, i)
 
         seg_img, color_seg_img = self.get_seg()
+        cv2.imshow("Current", color_seg_img)
+        cv2.imshow("Dir", color_seg_img)
+        cv2.waitKey(1)
+
         # if the target class not exist, pass
         if target_cls not in np.unique(seg_img):
             print("Failed to find %s" % OBJ_LIST[target_cls], file=sys.stderr)
@@ -176,7 +182,7 @@ class Env:
             self.obj_pos, _ = self.get_obj_pos(target_cls)
 
             # y축 보정
-            self.obj_pos[1] -= 0.015
+            # self.obj_pos[1] -= 0.014
 
             if self.obj_pos is None:
                 return
@@ -231,7 +237,6 @@ class Env:
 
     def detacher(self, target_cls, i):
         seg_img, color_img = self.get_seg()
-        cv2.imwrite("data\\neigoboring_{}_{}.png".format(self.steps, i), color_img)
         seg_img = np.array(seg_img)
 
         end_pt = [0, 0]
@@ -241,10 +246,6 @@ class Env:
 
         if len(sorted_neighboring_obj) == 0:
             return
-
-        # fig = plt.figure()
-        # plt.ylim(0, 128)
-        # plt.xlim(0, 256)
 
         center_x = 0.
         center_y = 0.
@@ -264,25 +265,18 @@ class Env:
             temp = np.array([data[:, 1], data[:, 0]]).transpose()
             label = np.concatenate((target_label, compare_label))
 
-            # a = target_pt.transpose()
-            # b = compare_pt.transpose()
-
-            # plt.scatter(a[1], a[0], c='yellow', marker=',')
-            # plt.scatter(b[1], b[0], c='green', marker=',')
-            # plt.scatter(center_x, center_y, c='purple', marker='x')
-
             clf = svm.SVC(kernel='linear', gamma=0.7, C=1)
             clf.fit(temp, label)
 
             w = clf.coef_[0]
             w_temp = np.copy(w[1])
 
-            othogonal = 0
+            orthogonal = 0
 
             if -10e-3 < w_temp < 10e-3:                                      # 수직으로 그래프가 나오면 계산이 안됨.
                 xxx = [center_x] * 128
                 yyy = list(range(0, 128))
-                othogonal = 1
+                orthogonal = 1
             else:                                                             # 수직 아닐때. 계산은 됨.
                 g = -w[0] / w_temp                                           # Decision Boundary 의 기울기.
 
@@ -300,9 +294,6 @@ class Env:
                 xxx = np.linspace(xx[min_idx], xx[max_idx])
                 yyy = g * xxx - (clf.intercept_[0]) / w[1]
 
-            # plt.scatter(xx[min_idx], yy[min_idx], marker='o')
-            # plt.scatter(xx[max_idx], yy[max_idx], marker='o')
-
             distance = np.inf
             new_center_x = 0
             new_center_y = 0
@@ -315,11 +306,11 @@ class Env:
                     new_center_x = x_1
                     new_center_y = y_1
 
-            # plt.scatter(new_center_x, new_center_y, marker='o', c='purple')
-
             # 수직일 때.
-            y_st = y_et = x_et = x_st = 0.
-            if othogonal == 1:
+            across_upper = 0
+            across_under = 0
+
+            if orthogonal == 1:
                 x_st = x_et = int(round(new_center_x))
 
                 y_under_range = list(reversed(np.linspace(0, new_center_y)))
@@ -328,8 +319,8 @@ class Env:
                 for y_st in y_under_range:
                     m = 0
 
-                    for i in range(-3, 4):
-                        for j in range(-3, 4):
+                    for i in range(-4, 5):
+                        for j in range(-4, 5):
                             y1 = int(round(j + y_st))
 
                             try:
@@ -347,8 +338,8 @@ class Env:
 
                 for y_et in y_upper_range:
                     m = 0
-                    for i in range(-3, 4):
-                        for j in range(-3, 4):
+                    for i in range(-4, 5):
+                        for j in range(-4, 5):
                             y_et_1 = int(round(j + y_et))
                             try:
                                 abc = seg_img[y_et_1, x_et]
@@ -376,8 +367,8 @@ class Env:
                     y_st = g * x_st - (clf.intercept_[0]) / w[1]
                     m = 0
 
-                    for i in range(-3, 4):
-                        for j in range(-3, 4):
+                    for i in range(-4, 5):
+                        for j in range(-4, 5):
                             x1 = int(round(i + x_st))
                             y1 = int(round(j + y_st))
 
@@ -385,52 +376,53 @@ class Env:
                                 abc = seg_img[y1, x1]
                                 if abc != 10:
                                     m += 1
+                                    across_under = 1
+
                             except IndexError:
                                 pass
 
                     if m == 0:
                         x_st = int(round(x_st))
                         y_st = int(round(y_st))
-                        # plt.scatter(x_st, y_st, marker='x', c='red')
                         start_pt = [y_st, x_st]
                         break
 
                 for x_et in x_upper_range:
                     y_et = g * x_et - (clf.intercept_[0]) / w[1]
                     m = 0
-                    for i in range(-3, 4):
-                        for j in range(-3, 4):
+
+                    for i in range(-4, 5):
+                        for j in range(-4, 5):
                             x_et_1 = int(round(i + x_et))
                             y_et_1 = int(round(j + y_et))
                             try:
                                 abc = seg_img[y_et_1, x_et_1]
                                 if abc != 10:
                                     m += 1
+                                    across_upper = 1
                             except IndexError:
                                 pass
 
                     if m == 0:
                         x_et = int(round(x_et))
                         y_et = int(round(y_et))
-                        # plt.scatter(x_et, y_et, marker='x', c='blue')
                         end_pt = [y_et, x_et]
                         break
 
+                if across_under == 1:
+                    print("across_under")
+                if across_upper == 1:
+                    print("across_upper")
 
-        ################
-
-        if center_y > 96:
+        if (start_pt[0] + end_pt[0])/2 > 64:
             end_pt, start_pt = start_pt, end_pt
 
-        cv2.line(color_img, (end_pt[1], end_pt[0]), (start_pt[1], start_pt[0]), (0, 255, 0))
-        cv2.imwrite("data\\Dir_{}_{}_{}.png".format(self.steps, target_cls, i), color_img)
-
-        if start_pt[0] < 35:
-            start_pt[0] = 35
+        if start_pt[0] < 40:
+            start_pt[0] = 40
         elif start_pt[0] > 107:
             start_pt[0] = 106
-        if end_pt[0] < 35:
-            end_pt[0] = 35
+        if end_pt[0] < 40:
+            end_pt[0] = 40
         elif end_pt[0] > 107:
             end_pt[0] = 106
 
@@ -446,17 +438,26 @@ class Env:
         if seg_img[start_pt[0], start_pt[1]] != 10:
             return
 
-        cv2.imshow("Dir complete", color_img)
-        cv2.waitKey(1)
+        # 2/3 push
+        mid_pt = [0, 0]
+        mid_pt[0] = int(round((start_pt[0] + 2 * end_pt[0]) / 3))
+        mid_pt[1] = int(round((start_pt[1] + 2 * end_pt[1]) / 3))
+        end_pt = mid_pt
 
+        cv2.line(color_img, (end_pt[1], end_pt[0]), (start_pt[1], start_pt[0]), (0, 255, 0), 1)
+        cv2.circle(color_img, (end_pt[1], end_pt[0]), 2, (255, 255, 255), -1)
+        cv2.circle(color_img, (start_pt[1], start_pt[0]), 2, (0, 0, 255), -1)
+
+        cv2.imshow("Dir", color_img)
+        cv2.waitKey(10)
 
         # starting to end point
         start_xyz = self.global_cam.color2xyz([start_pt])
         goal_xyz = self.global_cam.color2xyz([end_pt])  # patched image's averaging pose [x, y, z]
 
         # y축 보정
-        goal_xyz[1] -= 0.015
-        start_xyz[1] -= 0.015
+        # goal_xyz[1] -= 0.014
+        # start_xyz[1] -= 0.014
 
         # z-Axis
         goal_xyz[2] = -0.0555
@@ -595,7 +596,7 @@ class Env:
         self.gripper_open()
 
         # msg = input("Use detacher? (T/F)")
-        msg = 'T'
+        msg = 'F'
         if msg == 'T':
             self.use_detacher = True
         else:
@@ -604,14 +605,19 @@ class Env:
     def get_seg(self):
         img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
         padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)  # Color fmt    RGB -> BGR
-        cv2.imshow("Input_image", padded_img)
+
+        show_img = cv2.cvtColor(padded_img, cv2.COLOR_BGR2RGB)
+        cv2.imshow("Input_image", show_img)
 
         return self.seg_model.run(padded_img)
 
     def get_obj_pos(self, target_cls):  # TODO : class 0~8 repeat version
         _, _ = self.get_seg()
         pxl_list, eigen_value = self.seg_model.getData(target_cls)  # Get pixel list
-        xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
+
+        xyz = None
+        if pxl_list is not None:
+            xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
 
         return [xyz, eigen_value]
 
