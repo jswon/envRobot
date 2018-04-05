@@ -1,12 +1,14 @@
 """
 Vision based object grasping
-latest Ver.180124
+
+latest Ver.180405, backup
 """
 
 # Robot
 from Kinect_Snap import *
 import socket
 import pyGrip
+import urx
 
 # utils
 import cv2
@@ -35,10 +37,10 @@ j_pt = [[ 3.2842, -1.389,   1.7775, -1.9584, -1.5712,  0.1392],
         [-0.6512, -2.1626,  2.3689, -1.7789, -1.5735,  0.1435],
         [ 2.1833, -1.9322,  2.263 , -1.9026, -1.5712, -1.3421]]
 
-OBJ_LIST = ['O_00_Black_Tape', 'O_01_Glue', 'O_02_Big_USB', 'O_03_Glue_Stick', 'O_04_Big_Box',
-            'O_05_Red_Cup', 'O_06_Small_Box', 'O_07_White_Tape', 'O_08_Small_USB',  'O_09_Yellow_Cup']
+OBJ_LIST = ['Black_Tape', 'Glue', 'Big_USB', 'Glue_Stick', 'Big_Box',
+            'Red_Cup', 'Small_Box', 'White_Tape', 'Small_USB',  'Yellow_Cup']
 
-bkg_padding_img = cv2.imread('new_background\\bkg_img.png')[:36, :, :]
+bkg_padding_img = cv2.imread('background/bkg_img.png')[:36, :, :]
 # -------------------------------------------------------------------------------
 
 
@@ -74,8 +76,11 @@ class Env:
         self.steps = 0
 
         # Robot
-        self.acc = 5
-        self.vel = 5
+        self.acc = 4
+        self.vel = 6
+
+        self.start_pt = [0, 0]
+        self.end_pt = [0, 0]
 
         # Variables
         self.opts = opts
@@ -85,8 +90,8 @@ class Env:
         self.done = False
 
         # States - Local cam img. w : 256, h : 256, c :3
-        self.state_shape = (self.render_height, self.render_width, 3)
-        self.state = np.empty(self.state_shape, dtype=np.float32)
+        # self.state_shape = (self.render_height, self.render_width, 3)
+        # self.state = np.empty(self.state_shape, dtype=np.float32)
 
         # object position
         self.target_cls = 0
@@ -100,7 +105,7 @@ class Env:
         if self.opts.with_data_collecting:
             self.path_element = []
             self.max_num_list = []
-            #self.max_num_list = np.zeros([10], dtype= np.uint8)
+            # self.max_num_list = np.zeros([10], dtype= np.uint8)
             dir_path = "E:\\save_data_ik_v2\\"
 
             [self.path_element.append(dir_path + str(x) + "\\") for x in np.arange(10)]
@@ -114,8 +119,8 @@ class Env:
         self.set_tcp(self.default_tcp)
         self.movej(HOME, self.vel, self.acc)
 
-        # msg = input("Use detahcer? (T/F)")
-        msg = "F"
+        msg = input("Use detahcer? (T/F)")
+
         if msg == "T":
             self.use_detacher = True
         else:
@@ -123,6 +128,9 @@ class Env:
 
         self.x_boundary = [-0.297, 0.3034]
         self.y_boundary = [-0.447, -0.226]  # 427 432s 447
+
+        self.input_img = np.empty((128, 256))
+        self.vis_dir = False
 
         print("Robot Environment Ready.", file=sys.stderr)
 
@@ -145,11 +153,62 @@ class Env:
         self.movej(HOME, self.acc, self.vel)
         self.approaching(target_cls)             # robot move
 
-    def approaching(self, target_cls):
+    def env_img_update(self):
         seg_img, color_seg_img = self.get_seg()
+        env_img = self.global_cam.snap()[1]
+        pxl_list = np.argwhere(np.array(seg_img) == self.target_cls)
+        temp_img = np.zeros(shape=(128, 256), dtype=np.uint8)
+        [temp_img.itemset((y, x), 255) for [y, x] in pxl_list]
 
-        cv2.imshow("Current", color_seg_img)
+        _, contours, _ = cv2.findContours(temp_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        idx = 0
+        roi = np.empty((0, 4))
+        pre = 0
+        size_rank = 0
+
+        for cnt in contours:
+            if cv2.contourArea(cnt) < 60000:
+                idx += 1
+                cur = cv2.contourArea(cnt)
+
+                if pre < cur:
+                    size_rank = idx
+                    pre = cur
+
+                x, y, w, h = cv2.boundingRect(cnt)
+                roi = np.vstack([roi, [x, y, w, h]])
+
+        if roi.size != 0:
+            roi = roi.astype(int)
+            x = roi[size_rank - 1][0]
+            y = roi[size_rank - 1][1]
+            w = roi[size_rank - 1][2]
+            h = roi[size_rank - 1][3]
+
+            cv2.rectangle(env_img, (x, y + 128), (x + w, y + h + 128), (0, 0, 255), 1)
+            cv2.rectangle(self.input_img, (x, y), (x + w, y + h), (0, 0, 255), 1)
+
+        vert_img = np.vstack((self.input_img, color_seg_img))  # Color fmt    RGB -> BGR
+        cur_scene = np.hstack((env_img, vert_img))
+
+        if self.vis_dir is True :
+            cv2.rectangle(cur_scene, (256, 128), (511, 255), (0, 255, 0), 1)
+            cv2.line(cur_scene, (self.end_pt[1], self.end_pt[0]), (self.start_pt[1], self.start_pt[0]), (0, 255, 0), 1)
+            cv2.circle(cur_scene, (self.end_pt[1], self.end_pt[0]), 2, (255, 255, 255), -1)
+            cv2.circle(cur_scene, (self.start_pt[1], self.start_pt[0]), 2, (0, 0, 255), -1)
+
+        # image show
+        cur_scene = cv2.resize(cur_scene, (1024, 512))
+
+        cv2.putText(cur_scene, "Target : {}".format(OBJ_LIST[self.target_cls]), (512 + 35, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.imshow("Current Scene", cur_scene)
         cv2.waitKey(1)
+
+    def approaching(self, target_cls):
+        self.target_cls = target_cls
+        seg_img, color_seg_img = self.get_seg()
+        self.env_img_update()
 
         print(">> Target Object : ", OBJ_LIST[target_cls], file=sys.stderr)
 
@@ -159,18 +218,16 @@ class Env:
             self.obj_pos = None
             return
 
-        if self.use_detacher and (self.x_boundary[0]< self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
+        if self.use_detacher and (self.x_boundary[0] < self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
             for i in range(2):
                 _, color_seg_img = self.get_seg()
-                cv2.imshow("Current", color_seg_img)
-                cv2.imshow("Dir", color_seg_img)
-                cv2.waitKey(1)
-                self.detacher(target_cls, i)
+                self.env_img_update()
+                self.vis_dir = True
+                self.detacher(target_cls)
+                self.vis_dir = False
 
         seg_img, color_seg_img = self.get_seg()
-        cv2.imshow("Current", color_seg_img)
-        cv2.imshow("Dir", color_seg_img)
-        cv2.waitKey(1)
+        self.env_img_update()
 
         # if the target class not exist, pass
         if target_cls not in np.unique(seg_img):
@@ -187,7 +244,7 @@ class Env:
             if self.obj_pos is None:
                 return
 
-            # Safe zone        self.y_boundary = [-0.427, -0.226]
+            # Safe zone
             if (self.x_boundary[0]< self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
                 self.movej(starting_pose, self.acc, self.vel)      # Move to starting position,
 
@@ -217,7 +274,8 @@ class Env:
         # 내리고
         self.obj_pos[2] = -0.058
         goal = np.append(self.obj_pos, self.getl()[3:])  # Initial point
-
+        # goal value de
+        # goal[1]
         self.movel(goal, 0.5, 0.5)
         self.gripper_close()  # 닫고
 
@@ -235,7 +293,7 @@ class Env:
         l[2] += 0.057
         self.movel(l, 1, 1)
 
-    def detacher(self, target_cls, i):
+    def detacher(self, target_cls):
         seg_img, color_img = self.get_seg()
         seg_img = np.array(seg_img)
 
@@ -246,9 +304,6 @@ class Env:
 
         if len(sorted_neighboring_obj) == 0:
             return
-
-        center_x = 0.
-        center_y = 0.
 
         for n_obj in [sorted_neighboring_obj[0]]:
             # Linear classification
@@ -271,12 +326,12 @@ class Env:
             w = clf.coef_[0]
             w_temp = np.copy(w[1])
 
-            orthogonal = 0
+            othogonal = 0
 
             if -10e-3 < w_temp < 10e-3:                                      # 수직으로 그래프가 나오면 계산이 안됨.
                 xxx = [center_x] * 128
                 yyy = list(range(0, 128))
-                orthogonal = 1
+                othogonal = 1
             else:                                                             # 수직 아닐때. 계산은 됨.
                 g = -w[0] / w_temp                                           # Decision Boundary 의 기울기.
 
@@ -307,10 +362,7 @@ class Env:
                     new_center_y = y_1
 
             # 수직일 때.
-            across_upper = 0
-            across_under = 0
-
-            if orthogonal == 1:
+            if othogonal == 1:
                 x_st = x_et = int(round(new_center_x))
 
                 y_under_range = list(reversed(np.linspace(0, new_center_y)))
@@ -332,7 +384,6 @@ class Env:
 
                     if m == 0:
                         y_st = int(round(y_st))
-                        # plt.scatter(x_st, y_st, marker='x', c='red')
                         start_pt = [y_st, x_st]
                         break
 
@@ -350,7 +401,6 @@ class Env:
 
                     if m == 0:
                         y_et = int(round(y_et))
-                        # plt.scatter(x_et, y_et, marker='x', c='blue')
                         end_pt = [y_et, x_et]
                         break
 
@@ -376,7 +426,6 @@ class Env:
                                 abc = seg_img[y1, x1]
                                 if abc != 10:
                                     m += 1
-                                    across_under = 1
 
                             except IndexError:
                                 pass
@@ -399,7 +448,6 @@ class Env:
                                 abc = seg_img[y_et_1, x_et_1]
                                 if abc != 10:
                                     m += 1
-                                    across_upper = 1
                             except IndexError:
                                 pass
 
@@ -408,11 +456,6 @@ class Env:
                         y_et = int(round(y_et))
                         end_pt = [y_et, x_et]
                         break
-
-                if across_under == 1:
-                    print("across_under")
-                if across_upper == 1:
-                    print("across_upper")
 
         if (start_pt[0] + end_pt[0])/2 > 64:
             end_pt, start_pt = start_pt, end_pt
@@ -448,8 +491,17 @@ class Env:
         cv2.circle(color_img, (end_pt[1], end_pt[0]), 2, (255, 255, 255), -1)
         cv2.circle(color_img, (start_pt[1], start_pt[0]), 2, (0, 0, 255), -1)
 
-        cv2.imshow("Dir", color_img)
-        cv2.waitKey(10)
+        self.end_pt = np.copy(end_pt)
+        self.start_pt = np.copy(start_pt)
+
+        self.end_pt[1] += 256
+        self.end_pt[0] += 128
+        self.start_pt[1] += 256
+        self.start_pt[0] += 128
+
+        self.env_img_update()
+        # cv2.imshow("Dir", color_img)
+        # cv2.waitKey(10)
 
         # starting to end point
         start_xyz = self.global_cam.color2xyz([start_pt])
@@ -595,20 +647,17 @@ class Env:
         self.movej(HOME, a, v)
         self.gripper_open()
 
-        # msg = input("Use detacher? (T/F)")
-        msg = 'F'
+        msg = input("Use detacher? (T/F)")
         if msg == 'T':
             self.use_detacher = True
         else:
             self.use_detacher = False
 
     def get_seg(self):
-        img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
+        img = self.global_cam.snap()[0]  # Segmentation input image  w : 256, h : 128
         padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)  # Color fmt    RGB -> BGR
 
-        show_img = cv2.cvtColor(padded_img, cv2.COLOR_BGR2RGB)
-        cv2.imshow("Input_image", show_img)
-
+        self.input_img = cv2.cvtColor(padded_img, cv2.COLOR_BGR2RGB)
         return self.seg_model.run(padded_img)
 
     def get_obj_pos(self, target_cls):  # TODO : class 0~8 repeat version
