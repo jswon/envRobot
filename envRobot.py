@@ -57,6 +57,9 @@ class Env:
     def __init__(self, socket_ip, opts):
         # Connect to Environment
         self.gripper = pyGrip.Gripper(host=socket_ip)             # Gripper
+        self.gripper_init_pose = 0
+        self.all_clear = True
+
         self.rob = urx.Robot(socket_ip)                             # Robot
 
         # Dashboard Control
@@ -119,12 +122,12 @@ class Env:
         self.set_tcp(self.default_tcp)
         self.movej(HOME, self.vel, self.acc)
 
-        msg = input("Use detahcer? (T/F)")
+        msg = input("Use scatter? (T/F)")
 
         if msg == "T":
-            self.use_detacher = True
+            self.use_scatter = True
         else:
-            self.use_detacher = False
+            self.use_scatter = False
 
         self.x_boundary = [-0.297, 0.3034]
         self.y_boundary = [-0.447, -0.226]  # 427 432s 447
@@ -155,7 +158,7 @@ class Env:
 
     def env_img_update(self):
         seg_img, color_seg_img = self.get_seg()
-        env_img = self.global_cam.snap()[1]
+        env_img = self.global_cam.scene()
         pxl_list = np.argwhere(np.array(seg_img) == self.target_cls)
         temp_img = np.zeros(shape=(128, 256), dtype=np.uint8)
         [temp_img.itemset((y, x), 255) for [y, x] in pxl_list]
@@ -194,16 +197,28 @@ class Env:
 
         if self.vis_dir is True :
             cv2.rectangle(cur_scene, (256, 128), (511, 255), (0, 255, 0), 1)
+
+            self.end_pt[1] += 255
+            self.end_pt[0] += 127
+            self.start_pt[1] += 255
+            self.start_pt[0] += 127
+
             cv2.line(cur_scene, (self.end_pt[1], self.end_pt[0]), (self.start_pt[1], self.start_pt[0]), (0, 255, 0), 1)
             cv2.circle(cur_scene, (self.end_pt[1], self.end_pt[0]), 2, (255, 255, 255), -1)
             cv2.circle(cur_scene, (self.start_pt[1], self.start_pt[0]), 2, (0, 0, 255), -1)
 
         # image show
         cur_scene = cv2.resize(cur_scene, (1024, 512))
+        text_size = cv2.getTextSize("Target : {}".format(OBJ_LIST[self.target_cls]), 1, 2, 0)[0][0]
 
-        cv2.putText(cur_scene, "Target : {}".format(OBJ_LIST[self.target_cls]), (512 + 35, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cur_scene[:60, 1023-text_size-20:] = (255, 255, 255)
+        cv2.putText(cur_scene, "Target : {}".format(OBJ_LIST[self.target_cls]), (1023-text_size, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+
+        cur_scene = cv2.resize(cur_scene, (2048, 1024))
         cv2.imshow("Current Scene", cur_scene)
         cv2.waitKey(1)
+
+        return seg_img
 
     def approaching(self, target_cls):
         self.target_cls = target_cls
@@ -218,12 +233,13 @@ class Env:
             self.obj_pos = None
             return
 
-        if self.use_detacher and (self.x_boundary[0] < self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
-            for i in range(2):
+        if self.use_scatter and (self.x_boundary[0] < self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
+            for i in range(3):
                 _, color_seg_img = self.get_seg()
+                cv2.imshow("{}".format(i), color_seg_img)
                 self.env_img_update()
                 self.vis_dir = True
-                self.detacher(target_cls)
+                self.scatter(target_cls)
                 self.vis_dir = False
 
         seg_img, color_seg_img = self.get_seg()
@@ -238,8 +254,8 @@ class Env:
         else:
             self.obj_pos, _ = self.get_obj_pos(target_cls)
 
-            # y축 보정
-            # self.obj_pos[1] -= 0.014
+            # y축 보정 # TODO :
+            self.obj_pos[1] -= 0.014
 
             if self.obj_pos is None:
                 return
@@ -255,7 +271,7 @@ class Env:
 
                 self.movel(goal, self.acc, self.vel)
 
-                obj_ang = self.seg_model.get_boxed_angle(target_cls)
+                obj_ang, _ = self.seg_model.get_boxed_angle(target_cls)
                 self.target_angle = np.rad2deg(self.getj()[-1]) - obj_ang
             else:
                 self.obj_pos = None
@@ -264,18 +280,27 @@ class Env:
         # Target angle orienting
         if target_cls in [0, 7]:
             obj_angle = np.array([0])
+            self.gripper_init_pose = 35
         else:
-            obj_angle = self.seg_model.get_boxed_angle(target_cls)
+            obj_angle, w = self.seg_model.get_boxed_angle(target_cls)
             obj_angle = np.deg2rad(obj_angle)
 
+            self.gripper_init_pose = 226 - int(round(17 * w))
+            if self.gripper_init_pose < 13:
+                self.gripper_init_pose = 13
+
+        self.gripperMoveToInit()  # gripper init_pose
+        time.sleep(0.3)
+
         goal = np.append(self.rob.getj()[:-1], self.rob.getj()[-1] - obj_angle)
+
         self.rob.movej(goal, self.acc, self.vel)
 
-        # 내리고
+        # 내리
         self.obj_pos[2] = -0.058
+
         goal = np.append(self.obj_pos, self.getl()[3:])  # Initial point
-        # goal value de
-        # goal[1]
+
         self.movel(goal, 0.5, 0.5)
         self.gripper_close()  # 닫고
 
@@ -293,23 +318,43 @@ class Env:
         l[2] += 0.057
         self.movel(l, 1, 1)
 
-    def detacher(self, target_cls):
+    def hide_target_adj(self, seg_img, target_cls, n_obj):
+        hide_img = np.array(seg_img)
+        target_pt = np.argwhere(hide_img == target_cls)
+        n_obj_pt = np.argwhere(hide_img == n_obj)
+
+        total_pt = np.concatenate((target_pt, n_obj_pt), axis=0)
+
+        for pt_y, pt_x in total_pt:
+            hide_img[pt_y][pt_x] = 10
+
+        return hide_img
+
+    def scatter(self, target_cls):
         seg_img, color_img = self.get_seg()
         seg_img = np.array(seg_img)
 
         end_pt = [0, 0]
         start_pt = [0, 0]
+        slope = 0
 
         sorted_neighboring_obj = self.seg_model.find_neighboring_obj(seg_img, target_cls)
 
         if len(sorted_neighboring_obj) == 0:
             return
 
+        mean_target = 0
+        mean_neighbor = 0
+
         for n_obj in [sorted_neighboring_obj[0]]:
             # Linear classification
-            seg_img[0] = 127 - seg_img[0]
             target_pt = np.argwhere(seg_img == target_cls).astype("float64")
             compare_pt = np.argwhere(seg_img == n_obj).astype("float64")
+
+            mean_target = np.mean(target_pt, axis=0)
+            mean_neighbor = np.mean(compare_pt, axis =0)
+
+            # Target, Neighbor total Mean
             center_x = np.mean(np.concatenate((target_pt, compare_pt)), axis=0)[1]
             center_y = np.mean(np.concatenate((target_pt, compare_pt)), axis=0)[0]
 
@@ -324,44 +369,31 @@ class Env:
             clf.fit(temp, label)
 
             w = clf.coef_[0]
-            w_temp = np.copy(w[1])
+            w_1 = np.copy(w[1])   # 기울기
 
             othogonal = 0
 
-            if -10e-3 < w_temp < 10e-3:                                      # 수직으로 그래프가 나오면 계산이 안됨.
+            if -10e-3 < w_1 < 10e-3:                                          # 수직인 경우의.
                 xxx = [center_x] * 128
                 yyy = list(range(0, 128))
                 othogonal = 1
             else:                                                             # 수직 아닐때. 계산은 됨.
-                g = -w[0] / w_temp                                           # Decision Boundary 의 기울기.
+                slope = -w[0] / w_1                                               # Decision Boundary 의 기울기.
 
                 xx = np.arange(0, 256)
-                yy = g * xx - (clf.intercept_[0]) / w[1]
-                true_range = np.where(np.logical_and(yy < 128, yy > 0))
+                yy = slope * xx - (clf.intercept_[0]) / w[1]
 
-                if g > 0:
-                    min_idx = true_range[0][0]
-                    max_idx = true_range[0][-1]
-                else:
-                    min_idx = true_range[0][-1]
-                    max_idx = true_range[0][0]
+                true_range = np.sort(np.where(np.logical_and(yy < 128, yy > 0))[0])
 
-                xxx = np.linspace(xx[min_idx], xx[max_idx])
-                yyy = g * xxx - (clf.intercept_[0]) / w[1]
+                xxx = np.arange(true_range[0], true_range[-1])
+                yyy = slope * xxx - (clf.intercept_[0]) / w[1]
 
-            distance = np.inf
-            new_center_x = 0
-            new_center_y = 0
+            # 직선상 중심점 찾기.
+            idx = np.argmin(np.linalg.norm(np.array([xxx, yyy]).transpose() - np.array([center_x, center_y]), axis=1))
+            new_center_x = np.round(xxx[idx]).astype(np.int)
+            new_center_y = np.round(yyy[idx]).astype(np.int)
 
-            for x_1, y_1 in zip(xxx, yyy):
-                temp_dist = np.linalg.norm([x_1 - center_x, y_1 - center_y])
-
-                if temp_dist < distance:
-                    distance = temp_dist
-                    new_center_x = x_1
-                    new_center_y = y_1
-
-            # 수직일 때.
+            ## 수직일 때.
             if othogonal == 1:
                 x_st = x_et = int(round(new_center_x))
 
@@ -406,15 +438,15 @@ class Env:
 
             # 수직이 아닐 떄
             else:
-                if g > 0:
-                    x_under_range = list(reversed(np.linspace(xx[min_idx], new_center_x)))
-                    x_upper_range = np.linspace(new_center_x, xx[max_idx])
+                if slope > 0:
+                    x_under_range = list(reversed(np.linspace(xx[0], new_center_x)))
+                    x_upper_range = np.linspace(new_center_x, xx[-1])
                 else:
-                    x_under_range = np.linspace(new_center_x, xx[min_idx])
-                    x_upper_range = list(reversed(np.linspace(xx[max_idx], new_center_x)))
+                    x_under_range = np.linspace(new_center_x, xx[0])
+                    x_upper_range = list(reversed(np.linspace(xx[-1], new_center_x)))
 
                 for x_st in x_under_range:
-                    y_st = g * x_st - (clf.intercept_[0]) / w[1]
+                    y_st = slope * x_st - (clf.intercept_[0]) / w[1]
                     m = 0
 
                     for i in range(-4, 5):
@@ -437,7 +469,7 @@ class Env:
                         break
 
                 for x_et in x_upper_range:
-                    y_et = g * x_et - (clf.intercept_[0]) / w[1]
+                    y_et = slope * x_et - (clf.intercept_[0]) / w[1]
                     m = 0
 
                     for i in range(-4, 5):
@@ -457,57 +489,56 @@ class Env:
                         end_pt = [y_et, x_et]
                         break
 
-        if (start_pt[0] + end_pt[0])/2 > 64:
+        if (start_pt[0] + end_pt[0]) / 2 > 64:
             end_pt, start_pt = start_pt, end_pt
 
-        if start_pt[0] < 40:
-            start_pt[0] = 40
-        elif start_pt[0] > 107:
-            start_pt[0] = 106
-        if end_pt[0] < 40:
-            end_pt[0] = 40
-        elif end_pt[0] > 107:
-            end_pt[0] = 106
 
-        if start_pt[1] < 12:
-            start_pt[1] = 12
-        elif start_pt[1] > 243:
-            start_pt[1] = 243
-        if end_pt[1] < 12:
-            end_pt[1] = 12
-        elif end_pt[1] > 243:
-            end_pt[1] = 243
+        # Clip Working Space.
+        start_pt = clip(start_pt,[40, 106], [12, 243])
+        end_pt = clip(end_pt, [40, 106], [12, 243])
 
-        if seg_img[start_pt[0], start_pt[1]] != 10:
-            return
+        # if seg_img[start_pt[0], start_pt[1]] != 10:
+        # return
 
-        # 2/3 push
-        mid_pt = [0, 0]
-        mid_pt[0] = int(round((start_pt[0] + 2 * end_pt[0]) / 3))
-        mid_pt[1] = int(round((start_pt[1] + 2 * end_pt[1]) / 3))
-        end_pt = mid_pt
+        #
+        # # 2/3 push
+        # mid_pt = [0, 0]
+        # mid_pt[0] = int(round((start_pt[0] + 2 * end_pt[0]) / 3))
+        # mid_pt[1] = int(round((start_pt[1] + 2 * end_pt[1]) / 3))
+        # end_pt = mid_pt
+
+        # shift_x = 1
+        # shift_y = 1
+        #
+        # if mean_neighbor[0] < mean_target[0]:
+        #     shift_y = -1
+        #
+        # if mean_neighbor[1] < mean_target[1]:
+        #     shift_x = -1
+        #
+        # # Shift Points
+        # end_pt[0] = end_pt[0] + shift_y * 2
+        # end_pt[1] = end_pt[1] + shift_x * 2
+        #
+        # start_pt[0] = start_pt[0] + shift_y * 2
+        # start_pt[1] = start_pt[1] + shift_x * 2
 
         cv2.line(color_img, (end_pt[1], end_pt[0]), (start_pt[1], start_pt[0]), (0, 255, 0), 1)
         cv2.circle(color_img, (end_pt[1], end_pt[0]), 2, (255, 255, 255), -1)
         cv2.circle(color_img, (start_pt[1], start_pt[0]), 2, (0, 0, 255), -1)
 
+        # Current
         self.end_pt = np.copy(end_pt)
         self.start_pt = np.copy(start_pt)
 
-        self.end_pt[1] += 256
-        self.end_pt[0] += 128
-        self.start_pt[1] += 256
-        self.start_pt[0] += 128
-
-        self.env_img_update()
-        # cv2.imshow("Dir", color_img)
-        # cv2.waitKey(10)
+        temp_seg_img = self.env_img_update()
 
         # starting to end point
+
         start_xyz = self.global_cam.color2xyz([start_pt])
         goal_xyz = self.global_cam.color2xyz([end_pt])  # patched image's averaging pose [x, y, z]
 
-        # y축 보정
+        # y축 보정 필요 한가?
         # goal_xyz[1] -= 0.014
         # start_xyz[1] -= 0.014
 
@@ -528,6 +559,15 @@ class Env:
         self.movel(move_end_pt + np.array([0, 0, 0.15, 0, 0, 0]), 2, 2)
         self.movej(HOME, self.acc, self.vel)
         self.gripper_open(255)
+
+    @staticmethod
+    def overlapped_area(seg_img, overlap_obj):
+        area = 0
+
+        for cls in overlap_obj:
+            area += np.argwhere(np.array(seg_img) == cls).shape[0]
+
+        return area
 
     def getl(self):
         return np.array(self.rob.getl())
@@ -550,6 +590,22 @@ class Env:
             self.rob.movel(goal_pose, acc, vel)
         except urx.RobotException:
             self.status_chk()
+
+    def make_path(self, start, goal, dir):
+        start = np.array(start).astype(np.int)
+        goal = np.array(goal).astype(np.int)
+        zero = np.zeros((128, 256)).astype(np.uint8)
+        cv2.line(zero, (start[0], start[1]), (goal[0], goal[1]), (255, 255, 255), 1)
+
+        path = np.argwhere(zero == 255)
+
+        if dir is 'upper':
+            path = path[::-1]
+
+        cv2.imshow(dir, zero)
+        cv2.waitKey(1)
+
+        return path
 
     def _program_send(self, cmd):
         self.Dashboard_socket.send(cmd.encode())
@@ -583,6 +639,10 @@ class Env:
 
     def gripper_close(self, spd=50, force=80):
         self.gripper.close(spd, force)
+
+    def gripperMoveToInit(self, spd=255, force=80):
+        self.set_gripper(spd, force)
+        self.gripper.move(self.gripper_init_pose)
 
     def gripper_open(self, spd=50, force=80):
         self.gripper.open(spd, force)
@@ -647,14 +707,15 @@ class Env:
         self.movej(HOME, a, v)
         self.gripper_open()
 
-        msg = input("Use detacher? (T/F)")
+        msg = input("Use scatter? (T/F)")
+
         if msg == 'T':
-            self.use_detacher = True
+            self.use_scatter = True
         else:
-            self.use_detacher = False
+            self.use_scatter = False
 
     def get_seg(self):
-        img = self.global_cam.snap()[0]  # Segmentation input image  w : 256, h : 128
+        img = self.global_cam.snap()  # Segmentation input image  w : 256, h : 128
         padded_img = cv2.cvtColor(np.vstack((bkg_padding_img, img)), cv2.COLOR_RGB2BGR)  # Color fmt    RGB -> BGR
 
         self.input_img = cv2.cvtColor(padded_img, cv2.COLOR_BGR2RGB)
@@ -662,13 +723,13 @@ class Env:
 
     def get_obj_pos(self, target_cls):  # TODO : class 0~8 repeat version
         _, _ = self.get_seg()
-        pxl_list, eigen_value = self.seg_model.getData(target_cls)  # Get pixel list
+        pxl_list, mean_xy = self.seg_model.getData(target_cls)  # Get pixel list
 
         xyz = None
         if pxl_list is not None:
             xyz = self.global_cam.color2xyz(pxl_list)   # patched image's averaging pose [x, y, z]
 
-        return [xyz, eigen_value]
+        return [xyz, mean_xy]
 
     def set_tcp(self, tcp):
         self.rob.set_tcp(tcp)
