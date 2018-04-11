@@ -1,7 +1,9 @@
 """
 Vision based object grasping
 
-latest Ver.180405, backup
+latest Ver.180411
+
+데모용, 알고리즘 수정 버전. 버그 수정 전 백업.
 """
 
 # Robot
@@ -12,7 +14,10 @@ import urx
 
 # utils
 import cv2
+
+import queue
 import serial
+from numpy.ma.core import true_divide
 from sklearn import svm
 from matplotlib import pyplot as plt
 
@@ -89,6 +94,7 @@ class Env:
         self.opts = opts
         self.render_width = opts.render_width
         self.render_height = opts.render_height
+
         self.default_tcp = [0, 0, 0.150, 0, 0, 0]  # (x, y, z, rx, ry, rz)
         self.done = False
 
@@ -101,7 +107,6 @@ class Env:
         self.obj_pos = np.zeros([3])         # (x, y, z)
         self.eigen_value = np.zeros([2])
         self.target_angle = 0
-        # maximum and minimum angles of the 6-th joint for orienting task
 
         # Make directory for save Data Path
         # DATA SAVER FOR PRE-TRAINING
@@ -122,7 +127,8 @@ class Env:
         self.set_tcp(self.default_tcp)
         self.movej(HOME, self.vel, self.acc)
 
-        msg = input("Use scatter? (T/F)")
+        # msg = input("Use scatter? (T/F)")
+        msg = 'T'
 
         if msg == "T":
             self.use_scatter = True
@@ -211,14 +217,11 @@ class Env:
         cur_scene = cv2.resize(cur_scene, (1024, 512))
         text_size = cv2.getTextSize("Target : {}".format(OBJ_LIST[self.target_cls]), 1, 2, 0)[0][0]
 
-        cur_scene[:60, 1023-text_size-20:] = (255, 255, 255)
+        cur_scene[:60, 1023 - text_size-20:] = (255, 255, 255)
         cv2.putText(cur_scene, "Target : {}".format(OBJ_LIST[self.target_cls]), (1023-text_size, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-
-        cur_scene = cv2.resize(cur_scene, (2048, 1024))
+        # cur_scene = cv2.resize(cur_scene, (2048, 1024)) For Demo
         cv2.imshow("Current Scene", cur_scene)
         cv2.waitKey(1)
-
-        return seg_img
 
     def approaching(self, target_cls):
         self.target_cls = target_cls
@@ -236,7 +239,6 @@ class Env:
         if self.use_scatter and (self.x_boundary[0] < self.obj_pos[0] < self.x_boundary[1]) and (self.y_boundary[0] < self.obj_pos[1] < self.y_boundary[1]):
             for i in range(3):
                 _, color_seg_img = self.get_seg()
-                cv2.imshow("{}".format(i), color_seg_img)
                 self.env_img_update()
                 self.vis_dir = True
                 self.scatter(target_cls)
@@ -395,113 +397,169 @@ class Env:
 
             ## 수직일 때.
             if othogonal == 1:
-                x_st = x_et = int(round(new_center_x))
+                y_under_range = np.arange(new_center_y, 128)
+                y_upper_range = np.arange(0, new_center_y)
 
-                y_under_range = list(reversed(np.linspace(0, new_center_y)))
-                y_upper_range = np.linspace(new_center_y, 127)
+                list_size = y_under_range.size if y_under_range.size < y_upper_range.size else y_upper_range.size
 
-                for y_st in y_under_range:
-                    m = 0
+                hide_img = self.hide_target_adj(np.copy(seg_img), target_cls, n_obj)
 
-                    for i in range(-4, 5):
-                        for j in range(-4, 5):
-                            y1 = int(round(j + y_st))
+                overlap_under = []
+                overlap_upper = []
 
-                            try:
-                                abc = seg_img[y1, x_st]
-                                if abc != 10:
-                                    m += 1
-                            except IndexError:
-                                pass
+                y_upper_range = y_upper_range[::-1]
 
-                    if m == 0:
-                        y_st = int(round(y_st))
-                        start_pt = [y_st, x_st]
-                        break
+                for y_i in range(list_size):
+                    if hide_img[y_under_range[y_i]][new_center_x] != 10:
+                        overlap_under.append(hide_img[y_under_range[y_i]][new_center_x])
 
-                for y_et in y_upper_range:
-                    m = 0
-                    for i in range(-4, 5):
-                        for j in range(-4, 5):
-                            y_et_1 = int(round(j + y_et))
-                            try:
-                                abc = seg_img[y_et_1, x_et]
-                                if abc != 10:
-                                    m += 1
-                            except IndexError:
-                                pass
+                    if hide_img[y_upper_range[y_i]][new_center_x] != 10:
+                        overlap_upper.append(hide_img[y_upper_range[y_i]][new_center_x])
 
-                    if m == 0:
-                        y_et = int(round(y_et))
-                        end_pt = [y_et, x_et]
-                        break
+                    try:
+                        if y_i == 25:
+                            break
+                    except UnboundLocalError:
+                        pass
 
-            # 수직이 아닐 떄
+                overlap_under = np.unique(overlap_under)
+                overlap_upper = np.unique(overlap_upper)
+
+                overlap_upper_area = self.overlapped_area(seg_img, overlap_upper)
+                overlap_under_area = self.overlapped_area(seg_img, overlap_under)
+
+                m = 2
+
+                if (overlap_under.size == 0) and (overlap_upper.size == 0):
+                    if new_center_y / 2 > 46:
+                        start_pt = [y_upper_range[-18], new_center_x]
+                        end_pt = [y_under_range[10], new_center_x]
+                    else:
+                        start_pt = [y_under_range[-18], new_center_x]
+                        end_pt = [y_upper_range[10], new_center_x]
+
+                if m == -1:
+                    end_pt[0] = np.round((3 * new_center_y - 1 * start_pt[0]) / 2).astype(np.int)
+                    end_pt[1] = np.round((3 * new_center_x - 1 * start_pt[1]) / 2).astype(np.int)
+                    break
+
             else:
-                if slope > 0:
-                    x_under_range = list(reversed(np.linspace(xx[0], new_center_x)))
-                    x_upper_range = np.linspace(new_center_x, xx[-1])
+                if slope < 0:  #  ax+b 에서 a가 0보다 클 때
+                    upper_x_pt = xxx[-1]
+                    upper_y_pt = np.round(yy[xxx[-1]]).astype(np.int)
+
+                    under_x_pt = xxx[0]
+                    under_y_pt = np.round(yy[xxx[0]]).astype(np.int)
+
                 else:
-                    x_under_range = np.linspace(new_center_x, xx[0])
-                    x_upper_range = list(reversed(np.linspace(xx[-1], new_center_x)))
+                    upper_x_pt = xxx[0]
+                    upper_y_pt = np.round(yy[xxx[0]]).astype(np.int)
 
-                for x_st in x_under_range:
-                    y_st = slope * x_st - (clf.intercept_[0]) / w[1]
-                    m = 0
+                    under_x_pt = xxx[-1]
+                    under_y_pt = np.round(yy[xxx[-1]]).astype(np.int)
 
-                    for i in range(-4, 5):
-                        for j in range(-4, 5):
-                            x1 = int(round(i + x_st))
-                            y1 = int(round(j + y_st))
+                # list component : [y, x]
+                upper_list = self.make_path([upper_x_pt, upper_y_pt], [new_center_x, new_center_y], 'upper')
+                under_list = self.make_path([new_center_x, new_center_y], [under_x_pt, under_y_pt], 'under')
 
-                            try:
-                                abc = seg_img[y1, x1]
-                                if abc != 10:
-                                    m += 1
+                list_size = under_list.shape[0] if under_list.shape[0] < upper_list.shape[0] else upper_list.shape[0]
 
-                            except IndexError:
-                                pass
+                overlap_under = []
+                overlap_upper = []
+                hide_img = self.hide_target_adj(np.copy(seg_img), target_cls, n_obj)
 
-                    if m == 0:
-                        x_st = int(round(x_st))
-                        y_st = int(round(y_st))
-                        start_pt = [y_st, x_st]
+                for i in range(list_size):
+                    if hide_img[under_list[i][0]][under_list[i][1]] != 10:
+                        overlap_under.append(hide_img[under_list[i][0]][under_list[i][1]])
+
+                    if hide_img[upper_list[i][0]][upper_list[i][1]] != 10:
+                        overlap_upper.append(hide_img[upper_list[i][0]][upper_list[i][1]])
+
+                    if i == 30:
                         break
 
-                for x_et in x_upper_range:
-                    y_et = slope * x_et - (clf.intercept_[0]) / w[1]
-                    m = 0
+                overlap_under = np.unique(overlap_under)
+                overlap_upper = np.unique(overlap_upper)
 
-                    for i in range(-4, 5):
-                        for j in range(-4, 5):
-                            x_et_1 = int(round(i + x_et))
-                            y_et_1 = int(round(j + y_et))
-                            try:
-                                abc = seg_img[y_et_1, x_et_1]
-                                if abc != 10:
-                                    m += 1
-                            except IndexError:
-                                pass
+                overlap_upper_area = self.overlapped_area(seg_img, overlap_upper)
+                overlap_under_area = self.overlapped_area(seg_img, overlap_under)
 
-                    if m == 0:
-                        x_et = int(round(x_et))
-                        y_et = int(round(y_et))
-                        end_pt = [y_et, x_et]
-                        break
+                m = 2
 
-        if (start_pt[0] + end_pt[0]) / 2 > 64:
-            end_pt, start_pt = start_pt, end_pt
+                if (overlap_under.size == 0) and (overlap_upper.size ==0):
+                    for k, [y_1, x_1] in enumerate(under_list):
+                        m = 0
+                        for i in range(-4, 5):
+                            for j in range(-4, 5):
+                                try:
+                                    abc = seg_img[i + y_1][j + x_1]
+                                    if abc != 10:
+                                        m += 1
+                                except IndexError:
+                                    pass
+
+                        if m == 0:
+                            if new_center_y / 2 > 46:
+                                start_pt = under_list[k]  # [y_1, x_1]
+                                end_pt = upper_list[k]
+                            else:
+                                start_pt = upper_list[k]
+                                end_pt = under_list[k]
+                            break
+
+                elif (overlap_upper_area < overlap_under_area ) or ((overlap_under.size != 0) and (overlap_upper.size == 0)):
+                    print("Exist object where under Starting Point.")
+                    for y_1, x_1 in upper_list:
+                        m = 0
+                        for i in range(-4, 5):
+                            for j in range(-4, 5):
+                                try:
+                                    abc = seg_img[i + y_1][j + x_1]
+                                    if abc != 10:
+                                        m += 1
+                                except IndexError:
+                                    pass
+
+                        if m == 0:
+                            start_pt = [y_1, x_1]
+                            m = -1
+                            break
+
+                elif (overlap_upper_area > overlap_under_area ) or ((overlap_under.size == 0) and (overlap_upper.size != 0)):
+                    print("Exist object where upper Starting Point.")
+                    for y_1, x_1 in under_list:
+                        m = 0
+                        for i in range(-4, 5):
+                            for j in range(-4, 5):
+                                try:
+                                    abc = seg_img[i + y_1][j + x_1]
+                                    if abc != 10:
+                                        m += 1
+                                except IndexError:
+                                    pass
+
+                        if m == 0:
+                            start_pt = [y_1, x_1]
+                            m = -1
+                            break
+
+                if m == -1:
+                    end_pt[0] = np.round((3 * new_center_y - 1 * start_pt[0]) / 2).astype(np.int)
+                    end_pt[1] = np.round((3 * new_center_x - 1 * start_pt[1]) / 2).astype(np.int)
+                    break
 
 
         # Clip Working Space.
-        start_pt = clip(start_pt,[40, 106], [12, 243])
-        end_pt = clip(end_pt, [40, 106], [12, 243])
+        # start_pt = clip(start_pt, [40, 106], [12, 243])
+        # end_pt = clip(end_pt, [40, 106], [12, 243])
 
-        # if seg_img[start_pt[0], start_pt[1]] != 10:
-        # return
-
+        # if not (40 < start_pt[0] < 106) or not (12 < start_pt[1] < 243):
+        #     return
         #
-        # # 2/3 push
+        # if seg_img[start_pt[0], start_pt[1]] != 10:
+        #     return
+
+        # 2/3 push
         # mid_pt = [0, 0]
         # mid_pt[0] = int(round((start_pt[0] + 2 * end_pt[0]) / 3))
         # mid_pt[1] = int(round((start_pt[1] + 2 * end_pt[1]) / 3))
@@ -531,10 +589,9 @@ class Env:
         self.end_pt = np.copy(end_pt)
         self.start_pt = np.copy(start_pt)
 
-        temp_seg_img = self.env_img_update()
+        self.env_img_update()
 
         # starting to end point
-
         start_xyz = self.global_cam.color2xyz([start_pt])
         goal_xyz = self.global_cam.color2xyz([end_pt])  # patched image's averaging pose [x, y, z]
 
@@ -707,8 +764,8 @@ class Env:
         self.movej(HOME, a, v)
         self.gripper_open()
 
-        msg = input("Use scatter? (T/F)")
-
+        #msg = input("Use scatter? (T/F)")
+        msg = 'T'
         if msg == 'T':
             self.use_scatter = True
         else:
